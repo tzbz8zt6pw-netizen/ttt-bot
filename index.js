@@ -20,7 +20,10 @@ const client = new Client({
 const parser = new Parser();
 
 const BRAND_COLOR = 0xf35023;
-const BRAND_FOOTER = 'TTT Announcement System';
+const BRAND_NAME = 'TTT Markets';
+const BRAND_FOOTER = 'TTT Markets • Official Alerts';
+const YT_FOOTER = 'TTT Markets • YouTube Alerts';
+const LOGO_URL = 'https://tttmarkets.com/wp-content/uploads/2025/09/cropped-TTT-Logo.png';
 
 const DATA_FILE = path.join(__dirname, 'data.json');
 
@@ -38,6 +41,10 @@ function loadData() {
 
 function saveData(data) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+function getYoutubeThumbnail(videoId) {
+  return `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
 }
 
 const commands = [
@@ -92,11 +99,18 @@ async function postYoutubeVideo(video) {
 
   const embed = new EmbedBuilder()
     .setColor(BRAND_COLOR)
-    .setTitle('New YouTube Video')
-    .setDescription(`**${video.title}**\n\n[Watch now](${video.link})`)
+    .setAuthor({
+      name: `${BRAND_NAME} YouTube`,
+      iconURL: LOGO_URL,
+    })
+    .setTitle('🎥 New Video Just Dropped')
     .setURL(video.link)
+    .setDescription(
+      `**${video.title}**\n\nA new video has just been uploaded to the **${BRAND_NAME}** YouTube channel.\n\n[Watch now →](${video.link})`
+    )
+    .setThumbnail(LOGO_URL)
     .setImage(video.thumbnail)
-    .setFooter({ text: BRAND_FOOTER })
+    .setFooter({ text: YT_FOOTER, iconURL: LOGO_URL })
     .setTimestamp();
 
   await channel.send({
@@ -130,7 +144,7 @@ async function checkYoutubeFeed() {
       await postYoutubeVideo({
         title: latest.title,
         link: latest.link,
-        thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+        thumbnail: getYoutubeThumbnail(videoId),
       });
 
       data.lastVideoId = videoId;
@@ -159,9 +173,14 @@ client.on('interactionCreate', async interaction => {
 
     const embed = new EmbedBuilder()
       .setColor(BRAND_COLOR)
+      .setAuthor({
+        name: BRAND_NAME,
+        iconURL: LOGO_URL,
+      })
       .setTitle(title)
       .setDescription(message)
-      .setFooter({ text: BRAND_FOOTER })
+      .setThumbnail(LOGO_URL)
+      .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
       .setTimestamp();
 
     await interaction.reply({
@@ -172,9 +191,18 @@ client.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'testyt') {
     const embed = new EmbedBuilder()
       .setColor(BRAND_COLOR)
-      .setTitle('New YouTube Video')
-      .setDescription('**Test video title**\n\n[Watch now](https://youtube.com)')
-      .setFooter({ text: BRAND_FOOTER })
+      .setAuthor({
+        name: `${BRAND_NAME} YouTube`,
+        iconURL: LOGO_URL,
+      })
+      .setTitle('🎥 New Video Just Dropped')
+      .setURL('https://youtube.com')
+      .setDescription(
+        `**This is a branded test video**\n\nA new video has just been uploaded to the **${BRAND_NAME}** YouTube channel.\n\n[Watch now →](https://youtube.com)`
+      )
+      .setThumbnail(LOGO_URL)
+      .setImage('https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg')
+      .setFooter({ text: YT_FOOTER, iconURL: LOGO_URL })
       .setTimestamp();
 
     await interaction.reply({
@@ -187,4 +215,4 @@ client.on('interactionCreate', async interaction => {
 (async () => {
   await registerCommands();
   await client.login(process.env.DISCORD_TOKEN);
-})();
+})();git rm --cached .env
