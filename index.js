@@ -215,4 +215,4 @@ client.on('interactionCreate', async interaction => {
 (async () => {
   await registerCommands();
   await client.login(process.env.DISCORD_TOKEN);
-})();git rm --cached .env
+})()
