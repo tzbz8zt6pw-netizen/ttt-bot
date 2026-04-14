@@ -99,6 +99,26 @@ function buildSubscriptionButtons() {
   );
 }
 
+function buildAlertEmbed({ title, message, image }) {
+  const embed = new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setAuthor({
+      name: BRAND_NAME,
+      iconURL: LOGO_URL,
+    })
+    .setTitle(title)
+    .setDescription(message)
+    .setThumbnail(LOGO_URL)
+    .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
+    .setTimestamp();
+
+  if (image) {
+    embed.setImage(image);
+  }
+
+  return embed;
+}
+
 const commands = [
   new SlashCommandBuilder()
     .setName('announce')
@@ -138,19 +158,49 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
-    .setName('sendpromo')
-    .setDescription('Send a promo DM to all subscribed users')
+    .setName('sendalert')
+    .setDescription('Send an alert to subscribers and/or selected channels')
     .addStringOption(option =>
       option
         .setName('title')
-        .setDescription('Promo title')
+        .setDescription('Alert title')
         .setRequired(true)
     )
     .addStringOption(option =>
       option
         .setName('message')
-        .setDescription('Promo body')
+        .setDescription('Alert body')
         .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName('image')
+        .setDescription('Image URL (optional)')
+        .setRequired(false)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName('send_dm')
+        .setDescription('Send DM to subscribed users')
+        .setRequired(true)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName('general')
+        .setDescription('Post in #general')
+        .setRequired(false)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName('announcements')
+        .setDescription('Post in #announcements')
+        .setRequired(false)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName('active_promotions')
+        .setDescription('Post in #active-promotions')
+        .setRequired(false)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ];
@@ -241,33 +291,19 @@ async function checkYoutubeFeed() {
   }
 }
 
-async function notifySubscribersPromo(title, message) {
+async function sendAlertToSubscribers(embed) {
   const data = loadData();
   const subscribers = data.subscribers || [];
 
   let successCount = 0;
   let failCount = 0;
 
-  const embed = new EmbedBuilder()
-    .setColor(BRAND_COLOR)
-    .setAuthor({
-      name: BRAND_NAME,
-      iconURL: LOGO_URL,
-    })
-    .setTitle(title)
-    .setDescription(message)
-    .setThumbnail(LOGO_URL)
-    .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
-    .setTimestamp();
-
-  const components = [buildWebsiteButtonRow()];
-
   for (const userId of subscribers) {
     try {
       const user = await client.users.fetch(userId);
       await user.send({
         embeds: [embed],
-        components,
+        components: [buildWebsiteButtonRow()],
       });
       successCount += 1;
     } catch (error) {
@@ -283,6 +319,61 @@ async function notifySubscribersPromo(title, message) {
     successCount,
     failCount,
   };
+}
+
+async function sendAlertToSelectedChannels(embed, options) {
+  const channelTargets = [
+    {
+      enabled: options.general,
+      id: process.env.GENERAL_CHANNEL_ID,
+      label: 'general',
+    },
+    {
+      enabled: options.announcements,
+      id: process.env.ANNOUNCEMENTS_CHANNEL_ID,
+      label: 'announcements',
+    },
+    {
+      enabled: options.activePromotions,
+      id: process.env.ACTIVE_PROMOTIONS_CHANNEL_ID,
+      label: 'active-promotions',
+    },
+  ];
+
+  let postedCount = 0;
+  let failedCount = 0;
+
+  for (const target of channelTargets) {
+    if (!target.enabled) continue;
+    if (!target.id) {
+      failedCount += 1;
+      console.log(`Missing channel ID for ${target.label}`);
+      continue;
+    }
+
+    try {
+      const channel = await client.channels.fetch(target.id);
+
+      if (!channel) {
+        failedCount += 1;
+        console.log(`Channel not found for ${target.label}`);
+        continue;
+      }
+
+      await channel.send({
+        content: '@everyone',
+        embeds: [embed],
+        components: [buildWebsiteButtonRow()],
+      });
+
+      postedCount += 1;
+    } catch (error) {
+      failedCount += 1;
+      console.log(`Failed to post in ${target.label}: ${error.message}`);
+    }
+  }
+
+  return { postedCount, failedCount };
 }
 
 client.once('clientReady', async () => {
@@ -327,17 +418,7 @@ client.on('interactionCreate', async interaction => {
     const title = interaction.options.getString('title', true);
     const message = interaction.options.getString('message', true);
 
-    const embed = new EmbedBuilder()
-      .setColor(BRAND_COLOR)
-      .setAuthor({
-        name: BRAND_NAME,
-        iconURL: LOGO_URL,
-      })
-      .setTitle(title)
-      .setDescription(message)
-      .setThumbnail(LOGO_URL)
-      .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
-      .setTimestamp();
+    const embed = buildAlertEmbed({ title, message });
 
     await interaction.reply({
       embeds: [embed],
@@ -372,6 +453,8 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (interaction.commandName === 'setupalerts') {
+    const count = getSubscriberCount();
+
     const embed = new EmbedBuilder()
       .setColor(BRAND_COLOR)
       .setAuthor({
@@ -380,7 +463,7 @@ client.on('interactionCreate', async interaction => {
       })
       .setTitle('🔔 TTT Promo Alerts')
       .setDescription(
-        `Get **promotions, competitions, and important updates** directly by DM.\n\nClick below to manage your alerts.`
+        `Join **${count}+ traders** getting:\n\n• Promo codes\n• Competitions\n• Important updates\n\n⚡ Be first to know before they go live.`
       )
       .setThumbnail(LOGO_URL)
       .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
@@ -428,23 +511,50 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
-  if (interaction.commandName === 'sendpromo') {
+  if (interaction.commandName === 'sendalert') {
     const title = interaction.options.getString('title', true);
     const message = interaction.options.getString('message', true);
+    const image = interaction.options.getString('image');
+    const sendDM = interaction.options.getBoolean('send_dm', true);
+    const postGeneral = interaction.options.getBoolean('general') || false;
+    const postAnnouncements = interaction.options.getBoolean('announcements') || false;
+    const postActivePromotions = interaction.options.getBoolean('active_promotions') || false;
 
     await interaction.reply({
-      content: 'Sending promo DM to subscribed users...',
+      content: 'Sending alert...',
       ephemeral: true,
     });
 
-    const result = await notifySubscribersPromo(title, message);
+    const embed = buildAlertEmbed({
+      title,
+      message,
+      image,
+    });
+
+    let dmResult = {
+      total: 0,
+      successCount: 0,
+      failCount: 0,
+    };
+
+    if (sendDM) {
+      dmResult = await sendAlertToSubscribers(embed);
+    }
+
+    const channelResult = await sendAlertToSelectedChannels(embed, {
+      general: postGeneral,
+      announcements: postAnnouncements,
+      activePromotions: postActivePromotions,
+    });
 
     await interaction.followUp({
       content:
-        `Promo send complete.\n` +
-        `Subscribers: ${result.total}\n` +
-        `Sent: ${result.successCount}\n` +
-        `Failed: ${result.failCount}`,
+        `Alert complete.\n\n` +
+        `DM Subscribers: ${dmResult.total}\n` +
+        `DM Sent: ${dmResult.successCount}\n` +
+        `DM Failed: ${dmResult.failCount}\n` +
+        `Channel Posts: ${channelResult.postedCount}\n` +
+        `Channel Failures: ${channelResult.failedCount}`,
       ephemeral: true,
     });
     return;
