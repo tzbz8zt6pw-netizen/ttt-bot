@@ -11,13 +11,14 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
 } = require('discord.js');
 const Parser = require('rss-parser');
 const fs = require('fs');
 const path = require('path');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
 });
 
 const parser = new Parser();
@@ -28,12 +29,33 @@ const BRAND_FOOTER = 'TTT Markets • Official Alerts';
 const YT_FOOTER = 'TTT Markets • YouTube Alerts';
 const LOGO_URL = 'https://tttmarkets.com/wp-content/uploads/2025/09/cropped-TTT-Logo.png';
 const WEBSITE_URL = process.env.WEBSITE_URL || 'https://tttmarkets.com';
+const AUTO_POST_SHORTS = String(process.env.AUTO_POST_SHORTS || 'false').toLowerCase() === 'true';
 
 const DATA_FILE = path.join(__dirname, 'data.json');
 
+function defaultData() {
+  return {
+    lastVideoId: null,
+    subscribers: [],
+    welcomedUsers: [],
+    stats: {
+      totalAlertsRun: 0,
+      totalDmSent: 0,
+      totalDmFailed: 0,
+      totalChannelPosts: 0,
+      totalChannelFailures: 0,
+      totalWelcomePosts: 0,
+      totalWelcomeDMs: 0,
+      totalManualAdds: 0,
+      totalManualRemoves: 0,
+      lastAlertAt: null,
+    },
+  };
+}
+
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
-    return { lastVideoId: null, subscribers: [] };
+    return defaultData();
   }
 
   try {
@@ -41,9 +63,14 @@ function loadData() {
     return {
       lastVideoId: parsed.lastVideoId || null,
       subscribers: Array.isArray(parsed.subscribers) ? parsed.subscribers : [],
+      welcomedUsers: Array.isArray(parsed.welcomedUsers) ? parsed.welcomedUsers : [],
+      stats: {
+        ...defaultData().stats,
+        ...(parsed.stats || {}),
+      },
     };
   } catch {
-    return { lastVideoId: null, subscribers: [] };
+    return defaultData();
   }
 }
 
@@ -73,8 +100,46 @@ function getSubscriberCount() {
   return loadData().subscribers.length;
 }
 
+function markWelcomed(userId) {
+  const data = loadData();
+  if (!data.welcomedUsers.includes(userId)) {
+    data.welcomedUsers.push(userId);
+    saveData(data);
+  }
+}
+
+function hasBeenWelcomed(userId) {
+  return loadData().welcomedUsers.includes(userId);
+}
+
+function incrementStats(patch) {
+  const data = loadData();
+  data.stats = {
+    ...data.stats,
+    ...Object.fromEntries(
+      Object.entries(patch).map(([key, value]) => [
+        key,
+        typeof value === 'number' ? (data.stats[key] || 0) + value : value,
+      ])
+    ),
+  };
+  saveData(data);
+}
+
 function getYoutubeThumbnail(videoId) {
   return `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
+}
+
+function looksLikeShort(item) {
+  const title = String(item?.title || '').toLowerCase();
+  const link = String(item?.link || '').toLowerCase();
+
+  return (
+    title.includes('#shorts') ||
+    title.startsWith('shorts') ||
+    title.includes(' short ') ||
+    link.includes('/shorts/')
+  );
 }
 
 function buildWebsiteButtonRow() {
@@ -90,7 +155,7 @@ function buildSubscriptionButtons() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('subscribe_alerts')
-      .setLabel('Get Promo Alerts')
+      .setLabel('🔥 Get Early Access')
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId('unsubscribe_alerts')
@@ -117,6 +182,24 @@ function buildAlertEmbed({ title, message, image }) {
   }
 
   return embed;
+}
+
+function buildWelcomeEmbed(member) {
+  const count = getSubscriberCount();
+
+  return new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setAuthor({
+      name: BRAND_NAME,
+      iconURL: LOGO_URL,
+    })
+    .setTitle(`Welcome to ${BRAND_NAME}`)
+    .setDescription(
+      `Welcome ${member}.\n\nJoin **${count}+ traders** getting:\n\n• Promo codes\n• Limited-time discounts\n• Competitions & giveaways\n• Important updates\n\n⚡ Click below to get direct alerts.`
+    )
+    .setThumbnail(LOGO_URL)
+    .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
+    .setTimestamp();
 }
 
 const commands = [
@@ -155,6 +238,28 @@ const commands = [
   new SlashCommandBuilder()
     .setName('listsubscribers')
     .setDescription('List subscribed user IDs')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('addsubscriber')
+    .setDescription('Manually add a subscriber who asked to be added')
+    .addUserOption(option =>
+      option
+        .setName('user')
+        .setDescription('User to add')
+        .setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('removesubscriber')
+    .setDescription('Manually remove a subscriber')
+    .addUserOption(option =>
+      option
+        .setName('user')
+        .setDescription('User to remove')
+        .setRequired(true)
+    )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
@@ -200,6 +305,12 @@ const commands = [
       option
         .setName('active_promotions')
         .setDescription('Post in #active-promotions')
+        .setRequired(false)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName('ping_everyone')
+        .setDescription('Ping @everyone in selected channels')
         .setRequired(false)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -265,6 +376,11 @@ async function checkYoutubeFeed() {
     const latest = feed.items[0];
     const videoId = latest.id?.split(':').pop();
 
+    if (!AUTO_POST_SHORTS && looksLikeShort(latest)) {
+      console.log('Latest upload looks like a Short. Skipping auto-post.');
+      return;
+    }
+
     const data = loadData();
 
     if (!data.lastVideoId) {
@@ -314,6 +430,11 @@ async function sendAlertToSubscribers(embed) {
     await new Promise(resolve => setTimeout(resolve, 1200));
   }
 
+  incrementStats({
+    totalDmSent: successCount,
+    totalDmFailed: failCount,
+  });
+
   return {
     total: subscribers.length,
     successCount,
@@ -354,14 +475,14 @@ async function sendAlertToSelectedChannels(embed, options) {
     try {
       const channel = await client.channels.fetch(target.id);
 
-      if (!channel) {
+      if (!channel || channel.type !== ChannelType.GuildText) {
         failedCount += 1;
-        console.log(`Channel not found for ${target.label}`);
+        console.log(`Channel not found or not text for ${target.label}`);
         continue;
       }
 
       await channel.send({
-        content: '@everyone',
+        content: options.pingEveryone ? '@everyone' : '',
         embeds: [embed],
         components: [buildWebsiteButtonRow()],
       });
@@ -373,7 +494,50 @@ async function sendAlertToSelectedChannels(embed, options) {
     }
   }
 
+  incrementStats({
+    totalChannelPosts: postedCount,
+    totalChannelFailures: failedCount,
+  });
+
   return { postedCount, failedCount };
+}
+
+async function sendWelcomeFlow(member) {
+  if (hasBeenWelcomed(member.id)) {
+    return;
+  }
+
+  const embed = buildWelcomeEmbed(member);
+  const components = [buildSubscriptionButtons(), buildWebsiteButtonRow()];
+
+  try {
+    const welcomeChannelId = process.env.WELCOME_CHANNEL_ID;
+    if (welcomeChannelId) {
+      const channel = await client.channels.fetch(welcomeChannelId);
+      if (channel && channel.type === ChannelType.GuildText) {
+        await channel.send({
+          content: `${member}`,
+          embeds: [embed],
+          components,
+        });
+        incrementStats({ totalWelcomePosts: 1 });
+      }
+    }
+  } catch (error) {
+    console.log(`Failed welcome channel post for ${member.id}: ${error.message}`);
+  }
+
+  try {
+    await member.send({
+      embeds: [embed],
+      components,
+    });
+    incrementStats({ totalWelcomeDMs: 1 });
+  } catch (error) {
+    console.log(`Failed welcome DM for ${member.id}: ${error.message}`);
+  }
+
+  markWelcomed(member.id);
 }
 
 client.once('clientReady', async () => {
@@ -381,6 +545,25 @@ client.once('clientReady', async () => {
 
   await checkYoutubeFeed();
   setInterval(checkYoutubeFeed, 5 * 60 * 1000);
+});
+
+client.on('guildMemberAdd', async member => {
+  if (member.user.bot) return;
+
+  if (member.pending) {
+    console.log(`Member ${member.id} joined but is pending screening. Waiting.`);
+    return;
+  }
+
+  await sendWelcomeFlow(member);
+});
+
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  if (newMember.user.bot) return;
+
+  if (oldMember.pending && !newMember.pending) {
+    await sendWelcomeFlow(newMember);
+  }
 });
 
 client.on('interactionCreate', async interaction => {
@@ -392,7 +575,7 @@ client.on('interactionCreate', async interaction => {
 
       await interaction.reply({
         content: added
-          ? '✅ You are now subscribed to TTT promo alerts by DM.'
+          ? '✅ You’re in.\n\nYou’ll now receive:\n• Promo launches\n• Exclusive offers\n• Key updates\n\nCheck your DMs when the next drop goes live.'
           : 'ℹ️ You are already subscribed to TTT promo alerts.',
         ephemeral: true,
       });
@@ -463,7 +646,7 @@ client.on('interactionCreate', async interaction => {
       })
       .setTitle('🔔 TTT Promo Alerts')
       .setDescription(
-        `Join **${count}+ traders** getting:\n\n• Promo codes\n• Competitions\n• Important updates\n\n⚡ Be first to know before they go live.`
+        `Join **${count}+ traders** getting:\n\n• Promo codes\n• Limited-time discounts\n• Competitions & giveaways\n• Important updates\n\n⚡ Only subscribers receive certain drops first.`
       )
       .setThumbnail(LOGO_URL)
       .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
@@ -477,7 +660,9 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (interaction.commandName === 'subscriberstats') {
-    const count = getSubscriberCount();
+    const data = loadData();
+    const count = data.subscribers.length;
+    const stats = data.stats;
 
     const embed = new EmbedBuilder()
       .setColor(BRAND_COLOR)
@@ -486,7 +671,19 @@ client.on('interactionCreate', async interaction => {
         iconURL: LOGO_URL,
       })
       .setTitle('Subscriber Stats')
-      .setDescription(`Current subscribed users: **${count}**`)
+      .setDescription(
+        `Current subscribers: **${count}**\n\n` +
+        `Total alerts run: **${stats.totalAlertsRun}**\n` +
+        `Total DMs sent: **${stats.totalDmSent}**\n` +
+        `Total DM failures: **${stats.totalDmFailed}**\n` +
+        `Total channel posts: **${stats.totalChannelPosts}**\n` +
+        `Total channel failures: **${stats.totalChannelFailures}**\n` +
+        `Welcome channel posts: **${stats.totalWelcomePosts}**\n` +
+        `Welcome DMs: **${stats.totalWelcomeDMs}**\n` +
+        `Manual adds: **${stats.totalManualAdds}**\n` +
+        `Manual removes: **${stats.totalManualRemoves}**\n` +
+        `Last alert: **${stats.lastAlertAt || 'N/A'}**`
+      )
       .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
       .setTimestamp();
 
@@ -511,6 +708,40 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
+  if (interaction.commandName === 'addsubscriber') {
+    const user = interaction.options.getUser('user', true);
+    const added = addSubscriber(user.id);
+
+    if (added) {
+      incrementStats({ totalManualAdds: 1 });
+    }
+
+    await interaction.reply({
+      content: added
+        ? `✅ Added ${user} to the subscriber list.`
+        : `ℹ️ ${user} is already subscribed.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (interaction.commandName === 'removesubscriber') {
+    const user = interaction.options.getUser('user', true);
+    const removed = removeSubscriber(user.id);
+
+    if (removed) {
+      incrementStats({ totalManualRemoves: 1 });
+    }
+
+    await interaction.reply({
+      content: removed
+        ? `✅ Removed ${user} from the subscriber list.`
+        : `ℹ️ ${user} was not subscribed.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
   if (interaction.commandName === 'sendalert') {
     const title = interaction.options.getString('title', true);
     const message = interaction.options.getString('message', true);
@@ -519,6 +750,7 @@ client.on('interactionCreate', async interaction => {
     const postGeneral = interaction.options.getBoolean('general') || false;
     const postAnnouncements = interaction.options.getBoolean('announcements') || false;
     const postActivePromotions = interaction.options.getBoolean('active_promotions') || false;
+    const pingEveryone = interaction.options.getBoolean('ping_everyone') || false;
 
     await interaction.reply({
       content: 'Sending alert...',
@@ -545,6 +777,12 @@ client.on('interactionCreate', async interaction => {
       general: postGeneral,
       announcements: postAnnouncements,
       activePromotions: postActivePromotions,
+      pingEveryone,
+    });
+
+    incrementStats({
+      totalAlertsRun: 1,
+      lastAlertAt: new Date().toISOString(),
     });
 
     await interaction.followUp({
@@ -554,7 +792,8 @@ client.on('interactionCreate', async interaction => {
         `DM Sent: ${dmResult.successCount}\n` +
         `DM Failed: ${dmResult.failCount}\n` +
         `Channel Posts: ${channelResult.postedCount}\n` +
-        `Channel Failures: ${channelResult.failedCount}`,
+        `Channel Failures: ${channelResult.failedCount}\n` +
+        `Ping Everyone: ${pingEveryone ? 'Yes' : 'No'}`,
       ephemeral: true,
     });
     return;
