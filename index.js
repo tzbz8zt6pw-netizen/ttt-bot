@@ -165,40 +165,41 @@ function buildSubscriptionButtons() {
   );
 }
 
-function buildAlertEmbed({ title, message, image }) {
+function buildGenericEmbed({ title, message, imageUrl }) {
   const embed = new EmbedBuilder()
     .setColor(BRAND_COLOR)
-    .setAuthor({
-      name: BRAND_NAME,
-      iconURL: LOGO_URL,
-    })
     .setTitle(title)
     .setDescription(message)
-    .setThumbnail(LOGO_URL)
     .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
     .setTimestamp();
 
-  if (image) {
-    embed.setImage(image);
+  if (imageUrl) {
+    embed.setImage(imageUrl);
   }
 
   return embed;
 }
 
-function buildWelcomeEmbed(member) {
-  const count = getSubscriberCount();
-
+function buildYoutubeEmbed(video) {
   return new EmbedBuilder()
     .setColor(BRAND_COLOR)
-    .setAuthor({
-      name: BRAND_NAME,
-      iconURL: LOGO_URL,
-    })
+    .setTitle(video.title)
+    .setURL(video.link)
+    .setDescription(
+      `🎥 **New Video Dropped**\n\nA new video has just landed on the **${BRAND_NAME}** YouTube channel.\n\n🔥 [Watch now →](${video.link})`
+    )
+    .setImage(video.thumbnail)
+    .setFooter({ text: YT_FOOTER, iconURL: LOGO_URL })
+    .setTimestamp();
+}
+
+function buildWelcomeEmbed(member) {
+  return new EmbedBuilder()
+    .setColor(BRAND_COLOR)
     .setTitle(`Welcome to ${BRAND_NAME}`)
     .setDescription(
-      `Welcome ${member}.\n\nJoin **${count}+ traders** getting:\n\n• Promo codes\n• Limited-time discounts\n• Competitions & giveaways\n• Important updates\n\n⚡ Click below to get direct alerts.`
+      `Welcome ${member}.\n\nJoin **5000+ traders** getting:\n\n• Promo codes\n• Limited-time discounts\n• Competitions & giveaways\n• Important updates\n\n⚡ Click below to get direct alerts.`
     )
-    .setThumbnail(LOGO_URL)
     .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
     .setTimestamp();
 }
@@ -206,7 +207,7 @@ function buildWelcomeEmbed(member) {
 const commands = [
   new SlashCommandBuilder()
     .setName('announce')
-    .setDescription('Post a branded announcement in the server')
+    .setDescription('Send an announcement to subscribers and/or selected channels')
     .addStringOption(option =>
       option
         .setName('title')
@@ -218,6 +219,42 @@ const commands = [
         .setName('message')
         .setDescription('Announcement message')
         .setRequired(true)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName('send_dm')
+        .setDescription('Send DM to subscribed users')
+        .setRequired(true)
+    )
+    .addAttachmentOption(option =>
+      option
+        .setName('image')
+        .setDescription('Upload an image (optional)')
+        .setRequired(false)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName('general')
+        .setDescription('Post in #general')
+        .setRequired(false)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName('announcements')
+        .setDescription('Post in #announcements')
+        .setRequired(false)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName('active_promotions')
+        .setDescription('Post in #active-promotions')
+        .setRequired(false)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName('ping_everyone')
+        .setDescription('Ping @everyone in selected channels')
+        .setRequired(false)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
@@ -284,10 +321,10 @@ const commands = [
         .setDescription('Send DM to subscribed users')
         .setRequired(true)
     )
-    .addStringOption(option =>
+    .addAttachmentOption(option =>
       option
         .setName('image')
-        .setDescription('Image URL (optional)')
+        .setDescription('Upload an image (optional)')
         .setRequired(false)
     )
     .addBooleanOption(option =>
@@ -343,21 +380,7 @@ async function postYoutubeVideo(video) {
     return;
   }
 
-  const embed = new EmbedBuilder()
-    .setColor(BRAND_COLOR)
-    .setAuthor({
-      name: `${BRAND_NAME} YouTube`,
-      iconURL: LOGO_URL,
-    })
-    .setTitle('📊 New Trading Breakdown')
-    .setURL(video.link)
-    .setDescription(
-      `**${video.title}**\n\nA new breakdown has just been released by **${BRAND_NAME}**.\n\n📈 Insights. Execution. Strategy.\n\n🔥 [Watch the full video →](${video.link})`
-    )
-    .setThumbnail(LOGO_URL)
-    .setImage(video.thumbnail)
-    .setFooter({ text: YT_FOOTER, iconURL: LOGO_URL })
-    .setTimestamp();
+  const embed = buildYoutubeEmbed(video);
 
   await channel.send({
     embeds: [embed],
@@ -408,7 +431,7 @@ async function checkYoutubeFeed() {
   }
 }
 
-async function sendAlertToSubscribers(embed) {
+async function sendEmbedToSubscribers(embed) {
   const data = loadData();
   const subscribers = data.subscribers || [];
 
@@ -443,7 +466,7 @@ async function sendAlertToSubscribers(embed) {
   };
 }
 
-async function sendAlertToSelectedChannels(embed, options) {
+async function sendEmbedToSelectedChannels(embed, options) {
   const channelTargets = [
     {
       enabled: options.general,
@@ -503,6 +526,32 @@ async function sendAlertToSelectedChannels(embed, options) {
   return { postedCount, failedCount };
 }
 
+async function runBroadcast({ embed, sendDM, general, announcements, activePromotions, pingEveryone }) {
+  let dmResult = {
+    total: 0,
+    successCount: 0,
+    failCount: 0,
+  };
+
+  if (sendDM) {
+    dmResult = await sendEmbedToSubscribers(embed);
+  }
+
+  const channelResult = await sendEmbedToSelectedChannels(embed, {
+    general,
+    announcements,
+    activePromotions,
+    pingEveryone,
+  });
+
+  incrementStats({
+    totalAlertsRun: 1,
+    lastAlertAt: new Date().toISOString(),
+  });
+
+  return { dmResult, channelResult };
+}
+
 async function sendWelcomeFlow(member) {
   if (hasBeenWelcomed(member.id)) {
     return;
@@ -550,12 +599,7 @@ client.once('clientReady', async () => {
 
 client.on('guildMemberAdd', async member => {
   if (member.user.bot) return;
-
-  if (member.pending) {
-    console.log(`Member ${member.id} joined but is pending screening. Waiting.`);
-    return;
-  }
-
+  if (member.pending) return;
   await sendWelcomeFlow(member);
 });
 
@@ -601,32 +645,54 @@ client.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'announce') {
     const title = interaction.options.getString('title', true);
     const message = interaction.options.getString('message', true);
-    const embed = buildAlertEmbed({ title, message });
+    const sendDM = interaction.options.getBoolean('send_dm', true);
+    const image = interaction.options.getAttachment('image');
+    const postGeneral = interaction.options.getBoolean('general') || false;
+    const postAnnouncements = interaction.options.getBoolean('announcements') || false;
+    const postActivePromotions =
+      interaction.options.getBoolean('active_promotions') || false;
+    const pingEveryone = interaction.options.getBoolean('ping_everyone') || false;
 
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
     await interaction.editReply({
-      embeds: [embed],
-      components: [buildWebsiteButtonRow()],
+      content: 'Sending announcement...',
+    });
+
+    const embed = buildGenericEmbed({
+      title,
+      message,
+      imageUrl: image?.url || null,
+    });
+
+    const result = await runBroadcast({
+      embed,
+      sendDM,
+      general: postGeneral,
+      announcements: postAnnouncements,
+      activePromotions: postActivePromotions,
+      pingEveryone,
+    });
+
+    await interaction.followUp({
+      content:
+        `Announcement complete.\n\n` +
+        `DM Subscribers: ${result.dmResult.total}\n` +
+        `DM Sent: ${result.dmResult.successCount}\n` +
+        `DM Failed: ${result.dmResult.failCount}\n` +
+        `Channel Posts: ${result.channelResult.postedCount}\n` +
+        `Channel Failures: ${result.channelResult.failedCount}\n` +
+        `Ping Everyone: ${pingEveryone ? 'Yes' : 'No'}`,
+      ephemeral: true,
     });
     return;
   }
 
   if (interaction.commandName === 'testyt') {
-    const embed = new EmbedBuilder()
-      .setColor(BRAND_COLOR)
-      .setAuthor({
-        name: `${BRAND_NAME} YouTube`,
-        iconURL: LOGO_URL,
-      })
-      .setTitle('📊 New Trading Breakdown')
-      .setURL('https://youtube.com')
-      .setDescription(
-        `**This is a branded test video**\n\nA new breakdown has just been released by **${BRAND_NAME}**.\n\n📈 Insights. Execution. Strategy.\n\n🔥 [Watch the full video →](https://youtube.com)`
-      )
-      .setThumbnail(LOGO_URL)
-      .setImage('https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg')
-      .setFooter({ text: YT_FOOTER, iconURL: LOGO_URL })
-      .setTimestamp();
+    const embed = buildYoutubeEmbed({
+      title: 'This is a branded test video',
+      link: 'https://youtube.com',
+      thumbnail: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg',
+    });
 
     await interaction.deferReply();
     await interaction.editReply({
@@ -638,18 +704,12 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (interaction.commandName === 'setupalerts') {
-    const count = getSubscriberCount();
     const embed = new EmbedBuilder()
       .setColor(BRAND_COLOR)
-      .setAuthor({
-        name: BRAND_NAME,
-        iconURL: LOGO_URL,
-      })
       .setTitle('🔔 TTT Promo Alerts')
       .setDescription(
-        `Join **${count}+ traders** getting:\n\n• Promo codes\n• Limited-time discounts\n• Competitions & giveaways\n• Important updates\n\n⚡ Only subscribers receive certain drops first.`
+        `Join **5000+ traders** getting:\n\n• Promo codes\n• Limited-time discounts\n• Competitions & giveaways\n• Important updates\n\n⚡ Only subscribers receive certain drops first.`
       )
-      .setThumbnail(LOGO_URL)
       .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
       .setTimestamp();
 
@@ -668,10 +728,6 @@ client.on('interactionCreate', async interaction => {
 
     const embed = new EmbedBuilder()
       .setColor(BRAND_COLOR)
-      .setAuthor({
-        name: BRAND_NAME,
-        iconURL: LOGO_URL,
-      })
       .setTitle('Subscriber Stats')
       .setDescription(
         `Current subscribers: **${count}**\n\n` +
@@ -747,7 +803,7 @@ client.on('interactionCreate', async interaction => {
     const title = interaction.options.getString('title', true);
     const message = interaction.options.getString('message', true);
     const sendDM = interaction.options.getBoolean('send_dm', true);
-    const image = interaction.options.getString('image');
+    const image = interaction.options.getAttachment('image');
     const postGeneral = interaction.options.getBoolean('general') || false;
     const postAnnouncements = interaction.options.getBoolean('announcements') || false;
     const postActivePromotions =
@@ -759,42 +815,29 @@ client.on('interactionCreate', async interaction => {
       content: 'Sending alert...',
     });
 
-    const embed = buildAlertEmbed({
+    const embed = buildGenericEmbed({
       title,
       message,
-      image,
+      imageUrl: image?.url || null,
     });
 
-    let dmResult = {
-      total: 0,
-      successCount: 0,
-      failCount: 0,
-    };
-
-    if (sendDM) {
-      dmResult = await sendAlertToSubscribers(embed);
-    }
-
-    const channelResult = await sendAlertToSelectedChannels(embed, {
+    const result = await runBroadcast({
+      embed,
+      sendDM,
       general: postGeneral,
       announcements: postAnnouncements,
       activePromotions: postActivePromotions,
       pingEveryone,
     });
 
-    incrementStats({
-      totalAlertsRun: 1,
-      lastAlertAt: new Date().toISOString(),
-    });
-
     await interaction.followUp({
       content:
         `Alert complete.\n\n` +
-        `DM Subscribers: ${dmResult.total}\n` +
-        `DM Sent: ${dmResult.successCount}\n` +
-        `DM Failed: ${dmResult.failCount}\n` +
-        `Channel Posts: ${channelResult.postedCount}\n` +
-        `Channel Failures: ${channelResult.failedCount}\n` +
+        `DM Subscribers: ${result.dmResult.total}\n` +
+        `DM Sent: ${result.dmResult.successCount}\n` +
+        `DM Failed: ${result.dmResult.failCount}\n` +
+        `Channel Posts: ${result.channelResult.postedCount}\n` +
+        `Channel Failures: ${result.channelResult.failedCount}\n` +
         `Ping Everyone: ${pingEveryone ? 'Yes' : 'No'}`,
       ephemeral: true,
     });
