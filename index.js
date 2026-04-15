@@ -278,17 +278,17 @@ const commands = [
         .setDescription('Alert body')
         .setRequired(true)
     )
-    .addStringOption(option =>
-      option
-        .setName('image')
-        .setDescription('Image URL (optional)')
-        .setRequired(false)
-    )
     .addBooleanOption(option =>
       option
         .setName('send_dm')
         .setDescription('Send DM to subscribed users')
         .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName('image')
+        .setDescription('Image URL (optional)')
+        .setRequired(false)
     )
     .addBooleanOption(option =>
       option
@@ -601,7 +601,6 @@ client.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'announce') {
     const title = interaction.options.getString('title', true);
     const message = interaction.options.getString('message', true);
-
     const embed = buildAlertEmbed({ title, message });
 
     await interaction.deferReply();
@@ -640,7 +639,6 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.commandName === 'setupalerts') {
     const count = getSubscriberCount();
-
     const embed = new EmbedBuilder()
       .setColor(BRAND_COLOR)
       .setAuthor({
@@ -677,16 +675,16 @@ client.on('interactionCreate', async interaction => {
       .setTitle('Subscriber Stats')
       .setDescription(
         `Current subscribers: **${count}**\n\n` +
-        `Total alerts run: **${stats.totalAlertsRun}**\n` +
-        `Total DMs sent: **${stats.totalDmSent}**\n` +
-        `Total DM failures: **${stats.totalDmFailed}**\n` +
-        `Total channel posts: **${stats.totalChannelPosts}**\n` +
-        `Total channel failures: **${stats.totalChannelFailures}**\n` +
-        `Welcome channel posts: **${stats.totalWelcomePosts}**\n` +
-        `Welcome DMs: **${stats.totalWelcomeDMs}**\n` +
-        `Manual adds: **${stats.totalManualAdds}**\n` +
-        `Manual removes: **${stats.totalManualRemoves}**\n` +
-        `Last alert: **${stats.lastAlertAt || 'N/A'}**`
+          `Total alerts run: **${stats.totalAlertsRun}**\n` +
+          `Total DMs sent: **${stats.totalDmSent}**\n` +
+          `Total DM failures: **${stats.totalDmFailed}**\n` +
+          `Total channel posts: **${stats.totalChannelPosts}**\n` +
+          `Total channel failures: **${stats.totalChannelFailures}**\n` +
+          `Welcome channel posts: **${stats.totalWelcomePosts}**\n` +
+          `Welcome DMs: **${stats.totalWelcomeDMs}**\n` +
+          `Manual adds: **${stats.totalManualAdds}**\n` +
+          `Manual removes: **${stats.totalManualRemoves}**\n` +
+          `Last alert: **${stats.lastAlertAt || 'N/A'}**`
       )
       .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
       .setTimestamp();
@@ -700,7 +698,6 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.commandName === 'listsubscribers') {
     const subscribers = loadData().subscribers || [];
-
     const output = subscribers.length
       ? subscribers.map(id => `<@${id}> (${id})`).join('\n').slice(0, 1900)
       : 'No subscribers yet.';
@@ -749,8 +746,8 @@ client.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'sendalert') {
     const title = interaction.options.getString('title', true);
     const message = interaction.options.getString('message', true);
-    const image = interaction.options.getString('image');
     const sendDM = interaction.options.getBoolean('send_dm', true);
+    const image = interaction.options.getString('image');
     const postGeneral = interaction.options.getBoolean('general') || false;
     const postAnnouncements = interaction.options.getBoolean('announcements') || false;
     const postActivePromotions =
