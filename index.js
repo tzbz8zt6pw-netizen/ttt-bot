@@ -29,7 +29,8 @@ const BRAND_FOOTER = 'TTT Markets • Official Alerts';
 const YT_FOOTER = 'TTT Markets • YouTube Alerts';
 const LOGO_URL = 'https://tttmarkets.com/wp-content/uploads/2025/09/cropped-TTT-Logo.png';
 const WEBSITE_URL = process.env.WEBSITE_URL || 'https://tttmarkets.com';
-const AUTO_POST_SHORTS = String(process.env.AUTO_POST_SHORTS || 'false').toLowerCase() === 'true';
+const AUTO_POST_SHORTS =
+  String(process.env.AUTO_POST_SHORTS || 'false').toLowerCase() === 'true';
 
 const DATA_FILE = path.join(__dirname, 'data.json');
 
@@ -752,7 +753,8 @@ client.on('interactionCreate', async interaction => {
     const sendDM = interaction.options.getBoolean('send_dm', true);
     const postGeneral = interaction.options.getBoolean('general') || false;
     const postAnnouncements = interaction.options.getBoolean('announcements') || false;
-    const postActivePromotions = interaction.options.getBoolean('active_promotions') || false;
+    const postActivePromotions =
+      interaction.options.getBoolean('active_promotions') || false;
     const pingEveryone = interaction.options.getBoolean('ping_everyone') || false;
 
     await interaction.deferReply({ ephemeral: true });
