@@ -603,7 +603,8 @@ client.on('interactionCreate', async interaction => {
 
     const embed = buildAlertEmbed({ title, message });
 
-    await interaction.reply({
+    await interaction.deferReply();
+    await interaction.editReply({
       embeds: [embed],
       components: [buildWebsiteButtonRow()],
     });
@@ -627,7 +628,8 @@ client.on('interactionCreate', async interaction => {
       .setFooter({ text: YT_FOOTER, iconURL: LOGO_URL })
       .setTimestamp();
 
-    await interaction.reply({
+    await interaction.deferReply();
+    await interaction.editReply({
       content: 'Test YouTube alert:',
       embeds: [embed],
       components: [buildWebsiteButtonRow()],
@@ -652,7 +654,8 @@ client.on('interactionCreate', async interaction => {
       .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
       .setTimestamp();
 
-    await interaction.reply({
+    await interaction.deferReply();
+    await interaction.editReply({
       embeds: [embed],
       components: [buildSubscriptionButtons(), buildWebsiteButtonRow()],
     });
@@ -752,9 +755,9 @@ client.on('interactionCreate', async interaction => {
     const postActivePromotions = interaction.options.getBoolean('active_promotions') || false;
     const pingEveryone = interaction.options.getBoolean('ping_everyone') || false;
 
-    await interaction.reply({
+    await interaction.deferReply({ ephemeral: true });
+    await interaction.editReply({
       content: 'Sending alert...',
-      ephemeral: true,
     });
 
     const embed = buildAlertEmbed({
