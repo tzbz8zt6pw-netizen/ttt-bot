@@ -235,40 +235,22 @@ const commands = [
     .setName('announce')
     .setDescription('Send an announcement to subscribers and/or selected channels')
     .addStringOption(option =>
-      option
-        .setName('title')
-        .setDescription('Announcement title')
-        .setRequired(true)
+      option.setName('title').setDescription('Announcement title').setRequired(true)
     )
     .addStringOption(option =>
-      option
-        .setName('message')
-        .setDescription('Announcement message')
-        .setRequired(true)
+      option.setName('message').setDescription('Announcement message').setRequired(true)
     )
     .addBooleanOption(option =>
-      option
-        .setName('send_dm')
-        .setDescription('Send DM to subscribed users')
-        .setRequired(true)
+      option.setName('send_dm').setDescription('Send DM to subscribed users').setRequired(true)
     )
     .addAttachmentOption(option =>
-      option
-        .setName('image')
-        .setDescription('Upload an image (optional)')
-        .setRequired(false)
+      option.setName('image').setDescription('Upload an image (optional)').setRequired(false)
     )
     .addBooleanOption(option =>
-      option
-        .setName('general')
-        .setDescription('Post in #general')
-        .setRequired(false)
+      option.setName('general').setDescription('Post in #general').setRequired(false)
     )
     .addBooleanOption(option =>
-      option
-        .setName('announcements')
-        .setDescription('Post in #announcements')
-        .setRequired(false)
+      option.setName('announcements').setDescription('Post in #announcements').setRequired(false)
     )
     .addBooleanOption(option =>
       option
@@ -308,10 +290,7 @@ const commands = [
     .setName('addsubscriber')
     .setDescription('Manually add a subscriber who asked to be added')
     .addUserOption(option =>
-      option
-        .setName('user')
-        .setDescription('User to add')
-        .setRequired(true)
+      option.setName('user').setDescription('User to add').setRequired(true)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
@@ -319,10 +298,7 @@ const commands = [
     .setName('removesubscriber')
     .setDescription('Manually remove a subscriber')
     .addUserOption(option =>
-      option
-        .setName('user')
-        .setDescription('User to remove')
-        .setRequired(true)
+      option.setName('user').setDescription('User to remove').setRequired(true)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
@@ -330,40 +306,22 @@ const commands = [
     .setName('sendalert')
     .setDescription('Send an alert to subscribers and/or selected channels')
     .addStringOption(option =>
-      option
-        .setName('title')
-        .setDescription('Alert title')
-        .setRequired(true)
+      option.setName('title').setDescription('Alert title').setRequired(true)
     )
     .addStringOption(option =>
-      option
-        .setName('message')
-        .setDescription('Alert body')
-        .setRequired(true)
+      option.setName('message').setDescription('Alert body').setRequired(true)
     )
     .addBooleanOption(option =>
-      option
-        .setName('send_dm')
-        .setDescription('Send DM to subscribed users')
-        .setRequired(true)
+      option.setName('send_dm').setDescription('Send DM to subscribed users').setRequired(true)
     )
     .addAttachmentOption(option =>
-      option
-        .setName('image')
-        .setDescription('Upload an image (optional)')
-        .setRequired(false)
+      option.setName('image').setDescription('Upload an image (optional)').setRequired(false)
     )
     .addBooleanOption(option =>
-      option
-        .setName('general')
-        .setDescription('Post in #general')
-        .setRequired(false)
+      option.setName('general').setDescription('Post in #general').setRequired(false)
     )
     .addBooleanOption(option =>
-      option
-        .setName('announcements')
-        .setDescription('Post in #announcements')
-        .setRequired(false)
+      option.setName('announcements').setDescription('Post in #announcements').setRequired(false)
     )
     .addBooleanOption(option =>
       option
@@ -393,498 +351,3 @@ async function registerCommands() {
       { body: commands.map(command => command.toJSON()) }
     );
     console.log('Slash commands registered.');
-  } catch (error) {
-    console.error('Error registering commands:', error);
-  }
-}
-
-async function postYoutubeVideo(video) {
-  const channel = await client.channels.fetch(process.env.DISCORD_CHANNEL_ID);
-
-  if (!channel) {
-    console.error('Discord channel not found.');
-    return;
-  }
-
-  const embed = buildYoutubeEmbed(video);
-
-  const msg = await channel.send({
-    embeds: [embed],
-    components: [buildWebsiteButtonRow()],
-  });
-
-  await addReactions(msg, YT_REACTIONS);
-}
-
-async function checkYoutubeFeed() {
-  try {
-    const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${process.env.YOUTUBE_CHANNEL_ID}`;
-    const feed = await parser.parseURL(feedUrl);
-
-    if (!feed.items || feed.items.length === 0) {
-      return;
-    }
-
-    const latest = feed.items[0];
-    const videoId = latest.id?.split(':').pop();
-
-    if (!AUTO_POST_SHORTS && looksLikeShort(latest)) {
-      console.log('Latest upload looks like a Short. Skipping auto-post.');
-      return;
-    }
-
-    const data = loadData();
-
-    if (!data.lastVideoId) {
-      data.lastVideoId = videoId;
-      saveData(data);
-      console.log('Initial YouTube video saved, no alert sent.');
-      return;
-    }
-
-    if (data.lastVideoId !== videoId) {
-      await postYoutubeVideo({
-        title: latest.title,
-        link: latest.link,
-        thumbnail: getYoutubeThumbnail(videoId),
-      });
-
-      data.lastVideoId = videoId;
-      saveData(data);
-
-      console.log('New YouTube video posted.');
-    }
-  } catch (error) {
-    console.error('YouTube check failed:', error.message);
-  }
-}
-
-async function sendEmbedToSubscribers(embed) {
-  const data = loadData();
-  const subscribers = data.subscribers || [];
-
-  let successCount = 0;
-  let failCount = 0;
-
-  for (const userId of subscribers) {
-    try {
-      const user = await client.users.fetch(userId);
-      await user.send({
-        embeds: [embed],
-        components: [buildWebsiteButtonRow()],
-      });
-      successCount += 1;
-    } catch (error) {
-      failCount += 1;
-      console.log(`Failed DM to ${userId}: ${error.message}`);
-    }
-
-    await new Promise(resolve => setTimeout(resolve, 1200));
-  }
-
-  incrementStats({
-    totalDmSent: successCount,
-    totalDmFailed: failCount,
-  });
-
-  return {
-    total: subscribers.length,
-    successCount,
-    failCount,
-  };
-}
-
-async function sendEmbedToSelectedChannels(embed, options) {
-  const channelTargets = [
-    {
-      enabled: options.general,
-      id: process.env.GENERAL_CHANNEL_ID,
-      label: 'general',
-    },
-    {
-      enabled: options.announcements,
-      id: process.env.ANNOUNCEMENTS_CHANNEL_ID,
-      label: 'announcements',
-    },
-    {
-      enabled: options.activePromotions,
-      id: process.env.ACTIVE_PROMOTIONS_CHANNEL_ID,
-      label: 'active-promotions',
-    },
-  ];
-
-  let postedCount = 0;
-  let failedCount = 0;
-
-  for (const target of channelTargets) {
-    if (!target.enabled) continue;
-    if (!target.id) {
-      failedCount += 1;
-      console.log(`Missing channel ID for ${target.label}`);
-      continue;
-    }
-
-    try {
-      const channel = await client.channels.fetch(target.id);
-
-      if (!channel || channel.type !== ChannelType.GuildText) {
-        failedCount += 1;
-        console.log(`Channel not found or not text for ${target.label}`);
-        continue;
-      }
-
-      const msg = await channel.send({
-        content: options.pingEveryone ? '@everyone' : '',
-        embeds: [embed],
-        components: [buildWebsiteButtonRow()],
-      });
-
-      await addReactions(msg, ANNOUNCE_REACTIONS);
-      postedCount += 1;
-    } catch (error) {
-      failedCount += 1;
-      console.log(`Failed to post in ${target.label}: ${error.message}`);
-    }
-  }
-
-  incrementStats({
-    totalChannelPosts: postedCount,
-    totalChannelFailures: failedCount,
-  });
-
-  return { postedCount, failedCount };
-}
-
-async function runBroadcast({ embed, sendDM, general, announcements, activePromotions, pingEveryone }) {
-  let dmResult = {
-    total: 0,
-    successCount: 0,
-    failCount: 0,
-  };
-
-  if (sendDM) {
-    dmResult = await sendEmbedToSubscribers(embed);
-  }
-
-  const channelResult = await sendEmbedToSelectedChannels(embed, {
-    general,
-    announcements,
-    activePromotions,
-    pingEveryone,
-  });
-
-  incrementStats({
-    totalAlertsRun: 1,
-    lastAlertAt: new Date().toISOString(),
-  });
-
-  return { dmResult, channelResult };
-}
-
-async function sendWelcomeFlow(member) {
-  if (hasBeenWelcomed(member.id)) {
-    return;
-  }
-
-  const embed = buildWelcomeEmbed(member);
-  const components = [buildSubscriptionButtons(), buildWebsiteButtonRow()];
-
-  try {
-    const welcomeChannelId = process.env.WELCOME_CHANNEL_ID;
-    if (welcomeChannelId) {
-      const channel = await client.channels.fetch(welcomeChannelId);
-      if (channel && channel.type === ChannelType.GuildText) {
-        await channel.send({
-          content: `${member}`,
-          embeds: [embed],
-          components,
-        });
-        incrementStats({ totalWelcomePosts: 1 });
-      }
-    }
-  } catch (error) {
-    console.log(`Failed welcome channel post for ${member.id}: ${error.message}`);
-  }
-
-  try {
-    await member.send({
-      embeds: [embed],
-      components,
-    });
-    incrementStats({ totalWelcomeDMs: 1 });
-  } catch (error) {
-    console.log(`Failed welcome DM for ${member.id}: ${error.message}`);
-  }
-
-  markWelcomed(member.id);
-}
-
-client.once('clientReady', async () => {
-  console.log(`Bot is online as ${client.user.tag}`);
-
-  await checkYoutubeFeed();
-  setInterval(checkYoutubeFeed, 5 * 60 * 1000);
-});
-
-client.on('guildMemberAdd', async member => {
-  if (member.user.bot) return;
-  if (member.pending) return;
-  await sendWelcomeFlow(member);
-});
-
-client.on('guildMemberUpdate', async (oldMember, newMember) => {
-  if (newMember.user.bot) return;
-
-  if (oldMember.pending && !newMember.pending) {
-    await sendWelcomeFlow(newMember);
-  }
-});
-
-client.on('messageCreate', async message => {
-  if (message.author.bot) return;
-
-  const isVIP = VIP_USERS.includes(message.author.id);
-
-  if (isVIP && message.mentions.everyone) {
-    await addReactions(message, VIP_REACTIONS);
-  }
-});
-
-client.on('interactionCreate', async interaction => {
-  if (interaction.isButton()) {
-    const userId = interaction.user.id;
-
-    if (interaction.customId === 'subscribe_alerts') {
-      const added = addSubscriber(userId);
-
-      await interaction.reply({
-        content: added
-          ? '✅ You’re in.\n\nYou’ll now receive:\n• Promo launches\n• Exclusive offers\n• Key updates\n\nCheck your DMs when the next drop goes live.'
-          : 'ℹ️ You are already subscribed to TTT promo alerts.',
-        ephemeral: true,
-      });
-      return;
-    }
-
-    if (interaction.customId === 'unsubscribe_alerts') {
-      const removed = removeSubscriber(userId);
-
-      await interaction.reply({
-        content: removed
-          ? '✅ You have been unsubscribed from TTT promo alerts.'
-          : 'ℹ️ You were not currently subscribed.',
-        ephemeral: true,
-      });
-      return;
-    }
-  }
-
-  if (!interaction.isChatInputCommand()) return;
-
-  if (interaction.commandName === 'announce') {
-    const title = interaction.options.getString('title', true);
-    const message = interaction.options.getString('message', true);
-    const sendDM = interaction.options.getBoolean('send_dm', true);
-    const image = interaction.options.getAttachment('image');
-    const postGeneral = interaction.options.getBoolean('general') || false;
-    const postAnnouncements = interaction.options.getBoolean('announcements') || false;
-    const postActivePromotions =
-      interaction.options.getBoolean('active_promotions') || false;
-    const pingEveryone = interaction.options.getBoolean('ping_everyone') || false;
-
-    await interaction.deferReply({ ephemeral: true });
-    await interaction.editReply({
-      content: 'Sending announcement...',
-    });
-
-    const embed = buildGenericEmbed({
-      title,
-      message,
-      imageUrl: image?.url || null,
-    });
-
-    const result = await runBroadcast({
-      embed,
-      sendDM,
-      general: postGeneral,
-      announcements: postAnnouncements,
-      activePromotions: postActivePromotions,
-      pingEveryone,
-    });
-
-    await interaction.followUp({
-      content:
-        `Announcement complete.\n\n` +
-        `DM Subscribers: ${result.dmResult.total}\n` +
-        `DM Sent: ${result.dmResult.successCount}\n` +
-        `DM Failed: ${result.dmResult.failCount}\n` +
-        `Channel Posts: ${result.channelResult.postedCount}\n` +
-        `Channel Failures: ${result.channelResult.failedCount}\n` +
-        `Ping Everyone: ${pingEveryone ? 'Yes' : 'No'}`,
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (interaction.commandName === 'testyt') {
-    const embed = buildYoutubeEmbed({
-      title: 'This is a branded test video',
-      link: 'https://youtube.com',
-      thumbnail: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg',
-    });
-
-    await interaction.deferReply();
-    await interaction.editReply({
-      content: 'Test YouTube alert:',
-      embeds: [embed],
-      components: [buildWebsiteButtonRow()],
-    });
-    return;
-  }
-
-  if (interaction.commandName === 'setupalerts') {
-    const embed = new EmbedBuilder()
-      .setColor(BRAND_COLOR)
-      .setTitle('🔔 TTT Promo Alerts')
-      .setDescription(
-        `Join **5000+ traders** getting:\n\n• Promo codes\n• Limited-time discounts\n• Competitions & giveaways\n• Important updates\n\n⚡ Only subscribers receive certain drops first.`
-      )
-      .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
-      .setTimestamp();
-
-    await interaction.deferReply();
-    await interaction.editReply({
-      embeds: [embed],
-      components: [buildSubscriptionButtons(), buildWebsiteButtonRow()],
-    });
-    return;
-  }
-
-  if (interaction.commandName === 'subscriberstats') {
-    const data = loadData();
-    const count = data.subscribers.length;
-    const stats = data.stats;
-
-    const embed = new EmbedBuilder()
-      .setColor(BRAND_COLOR)
-      .setTitle('Subscriber Stats')
-      .setDescription(
-        `Current subscribers: **${count}**\n\n` +
-          `Total alerts run: **${stats.totalAlertsRun}**\n` +
-          `Total DMs sent: **${stats.totalDmSent}**\n` +
-          `Total DM failures: **${stats.totalDmFailed}**\n` +
-          `Total channel posts: **${stats.totalChannelPosts}**\n` +
-          `Total channel failures: **${stats.totalChannelFailures}**\n` +
-          `Welcome channel posts: **${stats.totalWelcomePosts}**\n` +
-          `Welcome DMs: **${stats.totalWelcomeDMs}**\n` +
-          `Manual adds: **${stats.totalManualAdds}**\n` +
-          `Manual removes: **${stats.totalManualRemoves}**\n` +
-          `Last alert: **${stats.lastAlertAt || 'N/A'}**`
-      )
-      .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
-      .setTimestamp();
-
-    await interaction.reply({
-      embeds: [embed],
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (interaction.commandName === 'listsubscribers') {
-    const subscribers = loadData().subscribers || [];
-    const output = subscribers.length
-      ? subscribers.map(id => `<@${id}> (${id})`).join('\n').slice(0, 1900)
-      : 'No subscribers yet.';
-
-    await interaction.reply({
-      content: output,
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (interaction.commandName === 'addsubscriber') {
-    const user = interaction.options.getUser('user', true);
-    const added = addSubscriber(user.id);
-
-    if (added) {
-      incrementStats({ totalManualAdds: 1 });
-    }
-
-    await interaction.reply({
-      content: added
-        ? `✅ Added ${user} to the subscriber list.`
-        : `ℹ️ ${user} is already subscribed.`,
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (interaction.commandName === 'removesubscriber') {
-    const user = interaction.options.getUser('user', true);
-    const removed = removeSubscriber(user.id);
-
-    if (removed) {
-      incrementStats({ totalManualRemoves: 1 });
-    }
-
-    await interaction.reply({
-      content: removed
-        ? `✅ Removed ${user} from the subscriber list.`
-        : `ℹ️ ${user} was not subscribed.`,
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (interaction.commandName === 'sendalert') {
-    const title = interaction.options.getString('title', true);
-    const message = interaction.options.getString('message', true);
-    const sendDM = interaction.options.getBoolean('send_dm', true);
-    const image = interaction.options.getAttachment('image');
-    const postGeneral = interaction.options.getBoolean('general') || false;
-    const postAnnouncements = interaction.options.getBoolean('announcements') || false;
-    const postActivePromotions =
-      interaction.options.getBoolean('active_promotions') || false;
-    const pingEveryone = interaction.options.getBoolean('ping_everyone') || false;
-
-    await interaction.deferReply({ ephemeral: true });
-    await interaction.editReply({
-      content: 'Sending alert...',
-    });
-
-    const embed = buildGenericEmbed({
-      title,
-      message,
-      imageUrl: image?.url || null,
-    });
-
-    const result = await runBroadcast({
-      embed,
-      sendDM,
-      general: postGeneral,
-      announcements: postAnnouncements,
-      activePromotions: postActivePromotions,
-      pingEveryone,
-    });
-
-    await interaction.followUp({
-      content:
-        `Alert complete.\n\n` +
-        `DM Subscribers: ${result.dmResult.total}\n` +
-        `DM Sent: ${result.dmResult.successCount}\n` +
-        `DM Failed: ${result.dmResult.failCount}\n` +
-        `Channel Posts: ${result.channelResult.postedCount}\n` +
-        `Channel Failures: ${result.channelResult.failedCount}\n` +
-        `Ping Everyone: ${pingEveryone ? 'Yes' : 'No'}`,
-      ephemeral: true,
-    });
-    return;
-  }
-});
-
-(async () => {
-  await registerCommands();
-  await client.login(process.env.DISCORD_TOKEN);
-})();
