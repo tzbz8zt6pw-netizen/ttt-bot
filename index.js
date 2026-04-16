@@ -18,7 +18,12 @@ const fs = require('fs');
 const path = require('path');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 const parser = new Parser();
@@ -31,6 +36,16 @@ const LOGO_URL = 'https://tttmarkets.com/wp-content/uploads/2025/09/cropped-TTT-
 const WEBSITE_URL = process.env.WEBSITE_URL || 'https://tttmarkets.com';
 const AUTO_POST_SHORTS =
   String(process.env.AUTO_POST_SHORTS || 'false').toLowerCase() === 'true';
+
+const OWNER_USER_ID = process.env.OWNER_USER_ID;
+const CEO_USER_ID = process.env.CEO_USER_ID;
+const WUMIC_USER_ID = process.env.WUMIC_USER_ID;
+
+const VIP_USERS = [OWNER_USER_ID, CEO_USER_ID, WUMIC_USER_ID].filter(Boolean);
+
+const YT_REACTIONS = ['🎥', '🔥', '📈', '🚀', '💰', '👀', '📊', '⚡', '💎', '🧠', '📣', '📌'];
+const ANNOUNCE_REACTIONS = ['🔥', '📢', '🚀', '💰', '👀', '📣', '🎯', '💎', '⚡', '🪙', '📊', '📌', '🚨'];
+const VIP_REACTIONS = ['🔥', '📢', '🚀', '👀', '💰', '📣', '⚡', '💎', '🧠', '📊', '🎯', '🚨'];
 
 const DATA_FILE = path.join(__dirname, 'data.json');
 
@@ -202,6 +217,17 @@ function buildWelcomeEmbed(member) {
     )
     .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
     .setTimestamp();
+}
+
+async function addReactions(message, reactions) {
+  for (const emoji of reactions) {
+    try {
+      await message.react(emoji);
+      await new Promise(resolve => setTimeout(resolve, 300));
+    } catch (error) {
+      console.log(`Failed to react with ${emoji}: ${error.message}`);
+    }
+  }
 }
 
 const commands = [
@@ -382,10 +408,12 @@ async function postYoutubeVideo(video) {
 
   const embed = buildYoutubeEmbed(video);
 
-  await channel.send({
+  const msg = await channel.send({
     embeds: [embed],
     components: [buildWebsiteButtonRow()],
   });
+
+  await addReactions(msg, YT_REACTIONS);
 }
 
 async function checkYoutubeFeed() {
@@ -505,12 +533,13 @@ async function sendEmbedToSelectedChannels(embed, options) {
         continue;
       }
 
-      await channel.send({
+      const msg = await channel.send({
         content: options.pingEveryone ? '@everyone' : '',
         embeds: [embed],
         components: [buildWebsiteButtonRow()],
       });
 
+      await addReactions(msg, ANNOUNCE_REACTIONS);
       postedCount += 1;
     } catch (error) {
       failedCount += 1;
@@ -608,6 +637,16 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
 
   if (oldMember.pending && !newMember.pending) {
     await sendWelcomeFlow(newMember);
+  }
+});
+
+client.on('messageCreate', async message => {
+  if (message.author.bot) return;
+
+  const isVIP = VIP_USERS.includes(message.author.id);
+
+  if (isVIP && message.mentions.everyone) {
+    await addReactions(message, VIP_REACTIONS);
   }
 });
 
