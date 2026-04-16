@@ -624,10 +624,59 @@ client.on('interactionCreate', async interaction => {
 
       await interaction.reply({
         content: added
-          ? '✅ You’re in.\n\nYou’ll now receive:\n• Promo launches\n• Exclusive offers\n• Key updates\n\nCheck your DMs when the next drop goes live.'
+          ? '✅ You’re in. Check your DMs 👀'
           : 'ℹ️ You are already subscribed to TTT promo alerts.',
         ephemeral: true,
       });
+
+      if (added) {
+        try {
+          const user = await client.users.fetch(userId);
+
+          const embed = new EmbedBuilder()
+            .setColor(BRAND_COLOR)
+            .setTitle('🚀 Welcome to TTT Early Access')
+            .setDescription(
+              `You’re now getting access to everything most traders miss.\n\n` +
+              `Here’s what separates TTT from most prop firms:\n\n` +
+              `• Up to 90% profit split\n` +
+              `• Low 5% profit targets (built for consistency)\n` +
+              `• Clear, rule-based structure — no hidden tricks\n` +
+              `• Fast payouts & scalable funding up to $1M\n\n` +
+              `We’ve built TTT for traders who want structure, not luck.\n\n` +
+              `👉 Get started:\n${WEBSITE_URL}\n\n` +
+              `—\n\n` +
+              `Need help or have questions?\n\n` +
+              `💬 WhatsApp (fastest):\nhttps://wa.me/message/CCZYYQBWUHWSB1\n\n` +
+              `📩 Support:\nsupport@tttmarkets.com\n\n` +
+              `💳 Billing:\nBilling@tttmarkets.com\n\n` +
+              `🤝 Partnerships:\nPartnerships@tttmarkets.com\n\n` +
+              `Or open a ticket inside Discord.\n\n` +
+              `We’ll point you in the right direction.`
+            )
+            .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
+            .setTimestamp();
+
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setLabel('Visit Website')
+              .setStyle(ButtonStyle.Link)
+              .setURL(WEBSITE_URL),
+            new ButtonBuilder()
+              .setLabel('WhatsApp Support')
+              .setStyle(ButtonStyle.Link)
+              .setURL('https://wa.me/message/CCZYYQBWUHWSB1')
+          );
+
+          await user.send({
+            embeds: [embed],
+            components: [row],
+          });
+        } catch (error) {
+          console.log(`Failed to send subscriber welcome DM to ${userId}: ${error.message}`);
+        }
+      }
+
       return;
     }
 
