@@ -453,31 +453,44 @@ async function checkYoutubeFeed() {
 
     if (!feed.items || feed.items.length === 0) return;
 
+    const recentItems = feed.items.slice(0, 10);
     const lastVideoId = await getAppState('lastVideoId');
-    const recentItems = feed.items.slice(0, 5);
-    const itemsToPost = [];
 
-    for (let i = recentItems.length - 1; i >= 0; i--) {
-      const item = recentItems[i];
-      const videoId = item.id?.split(':').pop();
-
-      if (!videoId) continue;
-      if (!AUTO_POST_SHORTS && looksLikeShort(item)) continue;
-
-      if (!lastVideoId || videoId !== lastVideoId) {
-        itemsToPost.push({
-          id: videoId,
-          title: item.title,
-          link: item.link,
-        });
-      } else {
-        break;
+    if (!lastVideoId) {
+      const newestVideoId = recentItems[0]?.id?.split(':').pop();
+      if (newestVideoId) {
+        await setAppState('lastVideoId', newestVideoId);
+        console.log('Initial YouTube video saved, no alert sent.');
       }
+      return;
     }
 
-    if (itemsToPost.length === 0) return;
+    const newVideos = [];
 
-    for (const video of itemsToPost) {
+    for (const item of recentItems) {
+      const videoId = item.id?.split(':').pop();
+      if (!videoId) continue;
+
+      if (videoId === lastVideoId) {
+        break;
+      }
+
+      if (!AUTO_POST_SHORTS && looksLikeShort(item)) {
+        continue;
+      }
+
+      newVideos.push({
+        id: videoId,
+        title: item.title,
+        link: item.link,
+      });
+    }
+
+    if (newVideos.length === 0) return;
+
+    newVideos.reverse();
+
+    for (const video of newVideos) {
       await postYoutubeVideo({
         title: video.title,
         link: video.link,
@@ -487,12 +500,12 @@ async function checkYoutubeFeed() {
       await new Promise(resolve => setTimeout(resolve, 1500));
     }
 
-    const newestVideoId = feed.items[0]?.id?.split(':').pop();
+    const newestVideoId = recentItems[0]?.id?.split(':').pop();
     if (newestVideoId) {
       await setAppState('lastVideoId', newestVideoId);
     }
 
-    console.log(`Posted ${itemsToPost.length} new YouTube video(s).`);
+    console.log(`Posted ${newVideos.length} new YouTube video(s).`);
   } catch (error) {
     console.error('YouTube check failed:', error.message);
   }
