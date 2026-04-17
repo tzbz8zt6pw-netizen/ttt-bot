@@ -635,7 +635,7 @@ client.on('interactionCreate', async interaction => {
 
           const embed = new EmbedBuilder()
             .setColor(BRAND_COLOR)
-            .setTitle('🚀 Welcome to TTT Early Access')
+            .setTitle('🚀 Welcome to TTT Markets')
             .setDescription(
               `You’re now getting access to everything most traders miss.\n\n` +
               `Here’s what separates TTT from most prop firms:\n\n` +
