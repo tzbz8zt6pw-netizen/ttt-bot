@@ -13,9 +13,8 @@ const {
   ButtonStyle,
   ChannelType,
 } = require('discord.js');
+const { Pool } = require('pg');
 const Parser = require('rss-parser');
-const fs = require('fs');
-const path = require('path');
 
 const client = new Client({
   intents: [
@@ -26,13 +25,19 @@ const client = new Client({
   ],
 });
 
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
 const parser = new Parser();
 
 const BRAND_COLOR = 0xf35023;
 const BRAND_NAME = 'TTT Markets';
 const BRAND_FOOTER = 'TTT Markets • Official Alerts';
 const YT_FOOTER = 'TTT Markets • YouTube Alerts';
-const LOGO_URL = 'https://tttmarkets.com/wp-content/uploads/2025/09/cropped-TTT-Logo.png';
+const LOGO_URL =
+  'https://tttmarkets.com/wp-content/uploads/2025/09/cropped-TTT-Logo.png';
 const WEBSITE_URL = process.env.WEBSITE_URL || 'https://tttmarkets.com';
 const AUTO_POST_SHORTS =
   String(process.env.AUTO_POST_SHORTS || 'false').toLowerCase() === 'true';
@@ -47,99 +52,178 @@ const YT_REACTIONS = ['🎥', '🔥', '📈', '🚀', '💰', '👀', '📊', '�
 const ANNOUNCE_REACTIONS = ['🔥', '📢', '🚀', '💰', '👀', '📣', '🎯', '💎', '⚡', '🪙', '📊', '📌', '🚨'];
 const VIP_REACTIONS = ['🔥', '📢', '🚀', '👀', '💰', '📣', '⚡', '💎', '🧠', '📊', '🎯', '🚨'];
 
-const DATA_FILE = path.join(__dirname, 'data.json');
+const DEFAULT_STATS = {
+  totalAlertsRun: 0,
+  totalDmSent: 0,
+  totalDmFailed: 0,
+  totalChannelPosts: 0,
+  totalChannelFailures: 0,
+  totalWelcomePosts: 0,
+  totalWelcomeDMs: 0,
+  totalManualAdds: 0,
+  totalManualRemoves: 0,
+  lastAlertAt: null,
+};
 
-function defaultData() {
-  return {
-    lastVideoId: null,
-    subscribers: [],
-    welcomedUsers: [],
-    stats: {
-      totalAlertsRun: 0,
-      totalDmSent: 0,
-      totalDmFailed: 0,
-      totalChannelPosts: 0,
-      totalChannelFailures: 0,
-      totalWelcomePosts: 0,
-      totalWelcomeDMs: 0,
-      totalManualAdds: 0,
-      totalManualRemoves: 0,
-      lastAlertAt: null,
-    },
-  };
-}
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS subscribers (
+      user_id TEXT PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 
-function loadData() {
-  if (!fs.existsSync(DATA_FILE)) {
-    return defaultData();
-  }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS welcomed_users (
+      user_id TEXT PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 
-  try {
-    const parsed = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    return {
-      lastVideoId: parsed.lastVideoId || null,
-      subscribers: Array.isArray(parsed.subscribers) ? parsed.subscribers : [],
-      welcomedUsers: Array.isArray(parsed.welcomedUsers) ? parsed.welcomedUsers : [],
-      stats: {
-        ...defaultData().stats,
-        ...(parsed.stats || {}),
-      },
-    };
-  } catch {
-    return defaultData();
-  }
-}
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_state (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
 
-function saveData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-}
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS stats (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
 
-function addSubscriber(userId) {
-  const data = loadData();
-  if (!data.subscribers.includes(userId)) {
-    data.subscribers.push(userId);
-    saveData(data);
-    return true;
-  }
-  return false;
-}
-
-function removeSubscriber(userId) {
-  const data = loadData();
-  const before = data.subscribers.length;
-  data.subscribers = data.subscribers.filter(id => id !== userId);
-  saveData(data);
-  return data.subscribers.length !== before;
-}
-
-function getSubscriberCount() {
-  return loadData().subscribers.length;
-}
-
-function markWelcomed(userId) {
-  const data = loadData();
-  if (!data.welcomedUsers.includes(userId)) {
-    data.welcomedUsers.push(userId);
-    saveData(data);
+  for (const [key, value] of Object.entries(DEFAULT_STATS)) {
+    await pool.query(
+      `
+      INSERT INTO stats (key, value)
+      VALUES ($1, $2)
+      ON CONFLICT (key) DO NOTHING
+      `,
+      [key, value === null ? '' : String(value)]
+    );
   }
 }
 
-function hasBeenWelcomed(userId) {
-  return loadData().welcomedUsers.includes(userId);
+async function addSubscriber(userId) {
+  const result = await pool.query(
+    `
+    INSERT INTO subscribers (user_id)
+    VALUES ($1)
+    ON CONFLICT (user_id) DO NOTHING
+    RETURNING user_id
+    `,
+    [userId]
+  );
+
+  return result.rowCount > 0;
 }
 
-function incrementStats(patch) {
-  const data = loadData();
-  data.stats = {
-    ...data.stats,
-    ...Object.fromEntries(
-      Object.entries(patch).map(([key, value]) => [
-        key,
-        typeof value === 'number' ? (data.stats[key] || 0) + value : value,
-      ])
-    ),
-  };
-  saveData(data);
+async function removeSubscriber(userId) {
+  const result = await pool.query(
+    `DELETE FROM subscribers WHERE user_id = $1`,
+    [userId]
+  );
+  return result.rowCount > 0;
+}
+
+async function getSubscriberCount() {
+  const result = await pool.query(
+    `SELECT COUNT(*)::int AS count FROM subscribers`
+  );
+  return result.rows[0].count;
+}
+
+async function getSubscriberIds() {
+  const result = await pool.query(
+    `SELECT user_id FROM subscribers ORDER BY created_at ASC`
+  );
+  return result.rows.map(row => row.user_id);
+}
+
+async function markWelcomed(userId) {
+  await pool.query(
+    `
+    INSERT INTO welcomed_users (user_id)
+    VALUES ($1)
+    ON CONFLICT (user_id) DO NOTHING
+    `,
+    [userId]
+  );
+}
+
+async function hasBeenWelcomed(userId) {
+  const result = await pool.query(
+    `SELECT 1 FROM welcomed_users WHERE user_id = $1 LIMIT 1`,
+    [userId]
+  );
+  return result.rowCount > 0;
+}
+
+async function getAppState(key) {
+  const result = await pool.query(
+    `SELECT value FROM app_state WHERE key = $1`,
+    [key]
+  );
+  return result.rowCount ? result.rows[0].value : null;
+}
+
+async function setAppState(key, value) {
+  await pool.query(
+    `
+    INSERT INTO app_state (key, value)
+    VALUES ($1, $2)
+    ON CONFLICT (key)
+    DO UPDATE SET value = EXCLUDED.value
+    `,
+    [key, value]
+  );
+}
+
+async function incrementStats(patch) {
+  for (const [key, value] of Object.entries(patch)) {
+    if (typeof value === 'number') {
+      await pool.query(
+        `
+        INSERT INTO stats (key, value)
+        VALUES ($1, $2)
+        ON CONFLICT (key)
+        DO UPDATE SET value = (
+          COALESCE(NULLIF(stats.value, ''), '0')::bigint + EXCLUDED.value::bigint
+        )::text
+        `,
+        [key, String(value)]
+      );
+    } else {
+      await pool.query(
+        `
+        INSERT INTO stats (key, value)
+        VALUES ($1, $2)
+        ON CONFLICT (key)
+        DO UPDATE SET value = EXCLUDED.value
+        `,
+        [key, value === null ? '' : String(value)]
+      );
+    }
+  }
+}
+
+async function getStats() {
+  const result = await pool.query(`SELECT key, value FROM stats`);
+  const stats = { ...DEFAULT_STATS };
+
+  for (const row of result.rows) {
+    if (!(row.key in stats)) continue;
+
+    if (row.key === 'lastAlertAt') {
+      stats[row.key] = row.value || null;
+    } else {
+      stats[row.key] = Number(row.value || 0);
+    }
+  }
+
+  return stats;
 }
 
 function getYoutubeThumbnail(videoId) {
@@ -253,16 +337,10 @@ const commands = [
       option.setName('announcements').setDescription('Post in #announcements').setRequired(false)
     )
     .addBooleanOption(option =>
-      option
-        .setName('active_promotions')
-        .setDescription('Post in #active-promotions')
-        .setRequired(false)
+      option.setName('active_promotions').setDescription('Post in #active-promotions').setRequired(false)
     )
     .addBooleanOption(option =>
-      option
-        .setName('ping_everyone')
-        .setDescription('Ping @everyone in selected channels')
-        .setRequired(false)
+      option.setName('ping_everyone').setDescription('Ping @everyone in selected channels').setRequired(false)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
@@ -324,16 +402,10 @@ const commands = [
       option.setName('announcements').setDescription('Post in #announcements').setRequired(false)
     )
     .addBooleanOption(option =>
-      option
-        .setName('active_promotions')
-        .setDescription('Post in #active-promotions')
-        .setRequired(false)
+      option.setName('active_promotions').setDescription('Post in #active-promotions').setRequired(false)
     )
     .addBooleanOption(option =>
-      option
-        .setName('ping_everyone')
-        .setDescription('Ping @everyone in selected channels')
-        .setRequired(false)
+      option.setName('ping_everyone').setDescription('Ping @everyone in selected channels').setRequired(false)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ];
@@ -379,47 +451,55 @@ async function checkYoutubeFeed() {
     const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${process.env.YOUTUBE_CHANNEL_ID}`;
     const feed = await parser.parseURL(feedUrl);
 
-    if (!feed.items || feed.items.length === 0) {
-      return;
+    if (!feed.items || feed.items.length === 0) return;
+
+    const lastVideoId = await getAppState('lastVideoId');
+    const recentItems = feed.items.slice(0, 5);
+    const itemsToPost = [];
+
+    for (let i = recentItems.length - 1; i >= 0; i--) {
+      const item = recentItems[i];
+      const videoId = item.id?.split(':').pop();
+
+      if (!videoId) continue;
+      if (!AUTO_POST_SHORTS && looksLikeShort(item)) continue;
+
+      if (!lastVideoId || videoId !== lastVideoId) {
+        itemsToPost.push({
+          id: videoId,
+          title: item.title,
+          link: item.link,
+        });
+      } else {
+        break;
+      }
     }
 
-    const latest = feed.items[0];
-    const videoId = latest.id?.split(':').pop();
+    if (itemsToPost.length === 0) return;
 
-    if (!AUTO_POST_SHORTS && looksLikeShort(latest)) {
-      console.log('Latest upload looks like a Short. Skipping auto-post.');
-      return;
-    }
-
-    const data = loadData();
-
-    if (!data.lastVideoId) {
-      data.lastVideoId = videoId;
-      saveData(data);
-      console.log('Initial YouTube video saved, no alert sent.');
-      return;
-    }
-
-    if (data.lastVideoId !== videoId) {
+    for (const video of itemsToPost) {
       await postYoutubeVideo({
-        title: latest.title,
-        link: latest.link,
-        thumbnail: getYoutubeThumbnail(videoId),
+        title: video.title,
+        link: video.link,
+        thumbnail: getYoutubeThumbnail(video.id),
       });
 
-      data.lastVideoId = videoId;
-      saveData(data);
-
-      console.log('New YouTube video posted.');
+      await new Promise(resolve => setTimeout(resolve, 1500));
     }
+
+    const newestVideoId = feed.items[0]?.id?.split(':').pop();
+    if (newestVideoId) {
+      await setAppState('lastVideoId', newestVideoId);
+    }
+
+    console.log(`Posted ${itemsToPost.length} new YouTube video(s).`);
   } catch (error) {
     console.error('YouTube check failed:', error.message);
   }
 }
 
 async function sendEmbedToSubscribers(embed) {
-  const data = loadData();
-  const subscribers = data.subscribers || [];
+  const subscribers = await getSubscriberIds();
 
   let successCount = 0;
   let failCount = 0;
@@ -440,7 +520,7 @@ async function sendEmbedToSubscribers(embed) {
     await new Promise(resolve => setTimeout(resolve, 1200));
   }
 
-  incrementStats({
+  await incrementStats({
     totalDmSent: successCount,
     totalDmFailed: failCount,
   });
@@ -505,7 +585,7 @@ async function sendEmbedToSelectedChannels(embed, options) {
     }
   }
 
-  incrementStats({
+  await incrementStats({
     totalChannelPosts: postedCount,
     totalChannelFailures: failedCount,
   });
@@ -538,7 +618,7 @@ async function runBroadcast({
     pingEveryone,
   });
 
-  incrementStats({
+  await incrementStats({
     totalAlertsRun: 1,
     lastAlertAt: new Date().toISOString(),
   });
@@ -547,7 +627,7 @@ async function runBroadcast({
 }
 
 async function sendWelcomeFlow(member) {
-  if (hasBeenWelcomed(member.id)) {
+  if (await hasBeenWelcomed(member.id)) {
     return;
   }
 
@@ -564,7 +644,7 @@ async function sendWelcomeFlow(member) {
           embeds: [embed],
           components,
         });
-        incrementStats({ totalWelcomePosts: 1 });
+        await incrementStats({ totalWelcomePosts: 1 });
       }
     }
   } catch (error) {
@@ -576,17 +656,18 @@ async function sendWelcomeFlow(member) {
       embeds: [embed],
       components,
     });
-    incrementStats({ totalWelcomeDMs: 1 });
+    await incrementStats({ totalWelcomeDMs: 1 });
   } catch (error) {
     console.log(`Failed welcome DM for ${member.id}: ${error.message}`);
   }
 
-  markWelcomed(member.id);
+  await markWelcomed(member.id);
 }
 
 client.once('clientReady', async () => {
   console.log(`Bot is online as ${client.user.tag}`);
 
+  await initDB();
   await checkYoutubeFeed();
   setInterval(checkYoutubeFeed, 5 * 60 * 1000);
 });
@@ -620,7 +701,7 @@ client.on('interactionCreate', async interaction => {
     const userId = interaction.user.id;
 
     if (interaction.customId === 'subscribe_alerts') {
-      const added = addSubscriber(userId);
+      const added = await addSubscriber(userId);
 
       await interaction.reply({
         content: added
@@ -638,21 +719,21 @@ client.on('interactionCreate', async interaction => {
             .setTitle('🚀 Welcome to TTT Markets')
             .setDescription(
               `You’re now getting access to everything most traders miss.\n\n` +
-              `Here’s what separates TTT from most prop firms:\n\n` +
-              `• Up to 90% profit split\n` +
-              `• Low 5% profit targets (built for consistency)\n` +
-              `• Clear, rule-based structure — no hidden tricks\n` +
-              `• Fast payouts & scalable funding up to $1M\n\n` +
-              `We’ve built TTT for traders who want structure, not luck.\n\n` +
-              `👉 Get started:\n${WEBSITE_URL}\n\n` +
-              `—\n\n` +
-              `Need help or have questions?\n\n` +
-              `💬 WhatsApp (fastest):\nhttps://wa.me/message/CCZYYQBWUHWSB1\n\n` +
-              `📩 Support:\nsupport@tttmarkets.com\n\n` +
-              `💳 Billing:\nBilling@tttmarkets.com\n\n` +
-              `🤝 Partnerships:\nPartnerships@tttmarkets.com\n\n` +
-              `Or open a ticket inside Discord.\n\n` +
-              `We’ll point you in the right direction.`
+                `Here’s what separates TTT from most prop firms:\n\n` +
+                `• Up to 90% profit split\n` +
+                `• Low 5% profit targets (built for consistency)\n` +
+                `• Clear, rule-based structure — no hidden tricks\n` +
+                `• Fast payouts & scalable funding up to $1M\n\n` +
+                `We’ve built TTT for traders who want structure, not luck.\n\n` +
+                `👉 Get started:\n${WEBSITE_URL}\n\n` +
+                `—\n\n` +
+                `Need help or have questions?\n\n` +
+                `💬 WhatsApp (fastest):\nhttps://wa.me/message/CCZYYQBWUHWSB1\n\n` +
+                `📩 Support:\nsupport@tttmarkets.com\n\n` +
+                `💳 Billing:\nBilling@tttmarkets.com\n\n` +
+                `🤝 Partnerships:\nPartnerships@tttmarkets.com\n\n` +
+                `Or open a ticket inside Discord.\n\n` +
+                `We’ll point you in the right direction.`
             )
             .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
             .setTimestamp();
@@ -681,7 +762,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.customId === 'unsubscribe_alerts') {
-      const removed = removeSubscriber(userId);
+      const removed = await removeSubscriber(userId);
 
       await interaction.reply({
         content: removed
@@ -702,8 +783,7 @@ client.on('interactionCreate', async interaction => {
     const image = interaction.options.getAttachment('image');
     const postGeneral = interaction.options.getBoolean('general') || false;
     const postAnnouncements = interaction.options.getBoolean('announcements') || false;
-    const postActivePromotions =
-      interaction.options.getBoolean('active_promotions') || false;
+    const postActivePromotions = interaction.options.getBoolean('active_promotions') || false;
     const pingEveryone = interaction.options.getBoolean('ping_everyone') || false;
 
     await interaction.deferReply({ ephemeral: true });
@@ -778,9 +858,8 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (interaction.commandName === 'subscriberstats') {
-    const data = loadData();
-    const count = data.subscribers.length;
-    const stats = data.stats;
+    const count = await getSubscriberCount();
+    const stats = await getStats();
 
     const embed = new EmbedBuilder()
       .setColor(BRAND_COLOR)
@@ -809,7 +888,8 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (interaction.commandName === 'listsubscribers') {
-    const subscribers = loadData().subscribers || [];
+    const subscribers = await getSubscriberIds();
+
     const output = subscribers.length
       ? subscribers.map(id => `<@${id}> (${id})`).join('\n').slice(0, 1900)
       : 'No subscribers yet.';
@@ -823,10 +903,10 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.commandName === 'addsubscriber') {
     const user = interaction.options.getUser('user', true);
-    const added = addSubscriber(user.id);
+    const added = await addSubscriber(user.id);
 
     if (added) {
-      incrementStats({ totalManualAdds: 1 });
+      await incrementStats({ totalManualAdds: 1 });
     }
 
     await interaction.reply({
@@ -840,10 +920,10 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.commandName === 'removesubscriber') {
     const user = interaction.options.getUser('user', true);
-    const removed = removeSubscriber(user.id);
+    const removed = await removeSubscriber(user.id);
 
     if (removed) {
-      incrementStats({ totalManualRemoves: 1 });
+      await incrementStats({ totalManualRemoves: 1 });
     }
 
     await interaction.reply({
@@ -862,8 +942,7 @@ client.on('interactionCreate', async interaction => {
     const image = interaction.options.getAttachment('image');
     const postGeneral = interaction.options.getBoolean('general') || false;
     const postAnnouncements = interaction.options.getBoolean('announcements') || false;
-    const postActivePromotions =
-      interaction.options.getBoolean('active_promotions') || false;
+    const postActivePromotions = interaction.options.getBoolean('active_promotions') || false;
     const pingEveryone = interaction.options.getBoolean('ping_everyone') || false;
 
     await interaction.deferReply({ ephemeral: true });
