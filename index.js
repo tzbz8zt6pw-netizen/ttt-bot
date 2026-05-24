@@ -1,5 +1,5 @@
 require('dotenv').config();
-
+const express = require('express');
 const {
   Client,
   GatewayIntentBits,
@@ -992,8 +992,88 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 });
+function startCRMStatsServer() {
+  const app = express();
+  const port = process.env.PORT || 3000;
 
+  app.get('/health', (req, res) => {
+    res.json({
+      ok: true,
+      service: 'discord-bot',
+      botReady: client.isReady(),
+      botUsername: client.user?.tag || null,
+      uptimeSeconds: Math.floor(process.uptime()),
+      generatedAt: new Date().toISOString(),
+    });
+  });
+
+  app.get('/api/crm-stats', async (req, res) => {
+    try {
+      if (!process.env.CRM_SHARED_SECRET) {
+        return res.status(500).json({
+          ok: false,
+          error: 'CRM_SHARED_SECRET is not configured',
+        });
+      }
+
+      if (req.query.secret !== process.env.CRM_SHARED_SECRET) {
+        return res.status(401).json({
+          ok: false,
+          error: 'Unauthorized',
+        });
+      }
+
+      const subscriberCount = await getSubscriberCount();
+      const stats = await getStats();
+      const lastVideoId = await getAppState('lastVideoId');
+
+      const welcomedResult = await pool.query(
+        `SELECT COUNT(*)::int AS count FROM welcomed_users`
+      );
+
+      res.json({
+        ok: true,
+        service: 'discord-bot',
+        botStatus: client.isReady() ? 'ONLINE' : 'STARTING',
+        botUsername: client.user?.tag || null,
+        uptimeSeconds: Math.floor(process.uptime()),
+
+        subscriberCount,
+        welcomedUsersCount: welcomedResult.rows[0]?.count || 0,
+
+        lastVideoId,
+        lastAlertAt: stats.lastAlertAt || null,
+
+        totals: {
+          totalAlertsRun: stats.totalAlertsRun,
+          totalDmSent: stats.totalDmSent,
+          totalDmFailed: stats.totalDmFailed,
+          totalChannelPosts: stats.totalChannelPosts,
+          totalChannelFailures: stats.totalChannelFailures,
+          totalWelcomePosts: stats.totalWelcomePosts,
+          totalWelcomeDMs: stats.totalWelcomeDMs,
+          totalManualAdds: stats.totalManualAdds,
+          totalManualRemoves: stats.totalManualRemoves,
+        },
+
+        generatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error('CRM stats endpoint failed:', error);
+
+      res.status(500).json({
+        ok: false,
+        error: 'Server error',
+      });
+    }
+  });
+
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`CRM stats API listening on port ${port}`);
+  });
+}
 (async () => {
+  startCRMStatsServer();
   await registerCommands();
   await client.login(process.env.DISCORD_TOKEN);
 })();
