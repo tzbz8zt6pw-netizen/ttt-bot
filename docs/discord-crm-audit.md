@@ -100,3 +100,22 @@
 - Add authenticated `/api/crm/discord/*` routes using `CRM_SHARED_SECRET`.
 - Store editable settings, templates, announcement drafts, managed posts, campaigns, and activity in new tables.
 - Keep `/health`, `/api/crm-stats`, all slash commands, and all existing environment variable names compatible.
+
+## CRM API Mismatches Found
+
+- Announcement and template list routes returned feature-specific keys (`announcements`, `templates`) instead of the CRM-standard `data` array plus `pagination`.
+- Several error responses returned string errors rather than `{ code, message }`.
+- Channel sync returned live channel data but did not persist it into a `discord_channels` source-of-truth table.
+- Settings existed as JSON blobs but did not expose grouped helpers, channel mappings, role mappings, or generic CRUD routes.
+- Secrets had no encrypted storage table or safe metadata-only API.
+- Auto-reaction rules still used hardcoded VIP arrays only and had no database-backed rules.
+- Subscriber responses returned IDs and timestamps only, without Discord profile metadata or DM delivery stats.
+- API-triggered announcement DMs were synchronous instead of queued as campaigns.
+
+## Completion Notes
+
+- Added standard CRM envelopes while retaining harmless legacy aliases on many routes.
+- Added additive tables for encrypted secrets, channel sync, channel mappings, role mappings, auto-reaction rules, and auto-reaction processing events.
+- Added AES-256-GCM encrypted secret writes using `DISCORD_SETTINGS_ENCRYPTION_KEY`; decrypted values are never returned.
+- Added optional HMAC authentication headers while keeping `CRM_SHARED_SECRET` compatibility.
+- Moved channel resolution toward DB-backed mappings first, with environment variables only as initial defaults/fallbacks.

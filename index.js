@@ -1,4 +1,5 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
 const {
   Client,
@@ -67,6 +68,29 @@ const TEMPLATE_TYPES = new Set([
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN;
 const POLLING_INTERVAL_MS = Number(process.env.YOUTUBE_POLLING_INTERVAL_MS || 5 * 60 * 1000);
+const CHANNEL_MAPPING_KEYS = [
+  'general',
+  'announcements',
+  'active_promotions',
+  'welcome',
+  'youtube',
+  'help',
+  'trading_rules',
+  'verified_links',
+  'payout_proofs',
+];
+const ROLE_MAPPING_KEYS = ['subscriber', 'admin', 'moderator', 'member'];
+const SECRET_DEFINITIONS = {
+  DISCORD_TOKEN: { label: 'Discord bot token', requiresRestart: true },
+  DISCORD_BOT_TOKEN: { label: 'Discord bot token fallback', requiresRestart: true },
+  DISCORD_APP_ID: { label: 'Discord application ID', requiresRestart: true },
+  DISCORD_GUILD_ID: { label: 'Discord guild ID', requiresRestart: true },
+  DISCORD_PUBLIC_KEY: { label: 'Discord public key', requiresRestart: true },
+  YOUTUBE_CHANNEL_ID: { label: 'YouTube channel ID', requiresRestart: false },
+  YOUTUBE_API_KEY: { label: 'YouTube API key', requiresRestart: false },
+  CRM_SHARED_SECRET: { label: 'CRM shared secret', requiresRestart: true },
+  INTERNAL_WEBHOOK_SECRET: { label: 'Internal webhook secret', requiresRestart: false },
+};
 
 const DEFAULT_STATS = {
   totalAlertsRun: 0,
@@ -119,6 +143,60 @@ const DEFAULT_YOUTUBE_SETTINGS = {
   autoPostShorts: AUTO_POST_SHORTS,
 };
 
+const DEFAULT_CORE_SETTINGS = {
+  guildId: process.env.DISCORD_GUILD_ID || null,
+  botDisplayName: BRAND_NAME,
+  defaultColor: BRAND_COLOR,
+  footer: BRAND_FOOTER,
+  youtubeFooter: YT_FOOTER,
+  logoUrl: LOGO_URL,
+  websiteUrl: WEBSITE_URL,
+  defaultReactions: {
+    youtube: YT_REACTIONS,
+    announcements: ANNOUNCE_REACTIONS,
+    vip: VIP_REACTIONS,
+    managedPosts: DEFAULT_MANAGED_REACTIONS,
+  },
+  featureToggles: {
+    welcome: true,
+    youtube: true,
+    announcements: true,
+    managedPosts: true,
+    autoReactions: true,
+  },
+  announcementDefaults: {
+    embedColor: BRAND_COLOR,
+    footer: BRAND_FOOTER,
+    reactions: ANNOUNCE_REACTIONS,
+    pingEveryone: false,
+    sendDm: false,
+  },
+  delays: {
+    dmMs: 1200,
+    reactionMs: 300,
+    youtubePostMs: 1500,
+  },
+};
+
+const DEFAULT_CHANNEL_MAPPINGS = {
+  general: process.env.GENERAL_CHANNEL_ID || null,
+  announcements: process.env.ANNOUNCEMENTS_CHANNEL_ID || null,
+  active_promotions: process.env.ACTIVE_PROMOTIONS_CHANNEL_ID || null,
+  welcome: process.env.WELCOME_CHANNEL_ID || null,
+  youtube: process.env.DISCORD_CHANNEL_ID || null,
+  help: null,
+  trading_rules: null,
+  verified_links: null,
+  payout_proofs: null,
+};
+
+const DEFAULT_ROLE_MAPPINGS = {
+  subscriber: process.env.SUBSCRIBER_ROLE_ID || null,
+  admin: null,
+  moderator: null,
+  member: null,
+};
+
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS subscribers (
@@ -155,6 +233,11 @@ async function initDB() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE discord_settings
+    ADD COLUMN IF NOT EXISTS group_key TEXT NOT NULL DEFAULT 'general';
   `);
 
   await pool.query(`
@@ -250,6 +333,127 @@ async function initDB() {
     );
   `);
 
+  await pool.query(`
+    ALTER TABLE discord_dm_campaigns
+    ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+  `);
+
+  await pool.query(`
+    ALTER TABLE discord_dm_campaigns
+    ADD COLUMN IF NOT EXISTS last_processed_recipient TEXT;
+  `);
+
+  await pool.query(`
+    ALTER TABLE discord_dm_campaigns
+    ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_secret_settings (
+      id BIGSERIAL PRIMARY KEY,
+      key TEXT UNIQUE NOT NULL,
+      encrypted_value TEXT,
+      iv TEXT,
+      auth_tag TEXT,
+      last_four TEXT,
+      configured BOOLEAN NOT NULL DEFAULT false,
+      requires_restart BOOLEAN NOT NULL DEFAULT false,
+      updated_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_channels (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      parent_category_id TEXT,
+      parent_category_name TEXT,
+      position INTEGER,
+      can_view BOOLEAN NOT NULL DEFAULT false,
+      can_send BOOLEAN NOT NULL DEFAULT false,
+      can_send_threads BOOLEAN NOT NULL DEFAULT false,
+      can_embed BOOLEAN NOT NULL DEFAULT false,
+      can_attach_files BOOLEAN NOT NULL DEFAULT false,
+      can_add_reactions BOOLEAN NOT NULL DEFAULT false,
+      can_read_history BOOLEAN NOT NULL DEFAULT false,
+      can_mention_everyone BOOLEAN NOT NULL DEFAULT false,
+      can_use_external_emojis BOOLEAN NOT NULL DEFAULT false,
+      can_manage_messages BOOLEAN NOT NULL DEFAULT false,
+      managed BOOLEAN NOT NULL DEFAULT false,
+      raw JSONB NOT NULL DEFAULT '{}'::jsonb,
+      synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_channel_mappings (
+      key TEXT PRIMARY KEY,
+      channel_id TEXT,
+      updated_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_role_mappings (
+      key TEXT PRIMARY KEY,
+      role_id TEXT,
+      updated_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_auto_reaction_rules (
+      id BIGSERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      reactions JSONB NOT NULL DEFAULT '[]'::jsonb,
+      react_to_bots BOOLEAN NOT NULL DEFAULT false,
+      react_to_members BOOLEAN NOT NULL DEFAULT true,
+      delay_ms INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_auto_reaction_users (
+      id BIGSERIAL PRIMARY KEY,
+      rule_id BIGINT NOT NULL REFERENCES discord_auto_reaction_rules(id) ON DELETE CASCADE,
+      discord_user_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (rule_id, discord_user_id)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_auto_reaction_channels (
+      id BIGSERIAL PRIMARY KEY,
+      rule_id BIGINT NOT NULL REFERENCES discord_auto_reaction_rules(id) ON DELETE CASCADE,
+      discord_channel_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (rule_id, discord_channel_id)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_auto_reaction_events (
+      message_id TEXT NOT NULL,
+      rule_id BIGINT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (message_id, rule_id)
+    );
+  `);
+
   for (const [key, value] of Object.entries(DEFAULT_STATS)) {
     await pool.query(
       `
@@ -261,8 +465,33 @@ async function initDB() {
     );
   }
 
-  await ensureSetting('welcome', DEFAULT_WELCOME_SETTINGS);
-  await ensureSetting('youtube', DEFAULT_YOUTUBE_SETTINGS);
+  await ensureSetting('core', DEFAULT_CORE_SETTINGS, 'core');
+  await ensureSetting('welcome', DEFAULT_WELCOME_SETTINGS, 'welcome');
+  await ensureSetting('youtube', DEFAULT_YOUTUBE_SETTINGS, 'youtube');
+  await ensureSetting('channel_mappings', DEFAULT_CHANNEL_MAPPINGS, 'mappings');
+  await ensureSetting('role_mappings', DEFAULT_ROLE_MAPPINGS, 'mappings');
+
+  for (const [key, channelId] of Object.entries(DEFAULT_CHANNEL_MAPPINGS)) {
+    await pool.query(
+      `
+      INSERT INTO discord_channel_mappings (key, channel_id)
+      VALUES ($1, $2)
+      ON CONFLICT (key) DO NOTHING
+      `,
+      [key, channelId]
+    );
+  }
+
+  for (const [key, roleId] of Object.entries(DEFAULT_ROLE_MAPPINGS)) {
+    await pool.query(
+      `
+      INSERT INTO discord_role_mappings (key, role_id)
+      VALUES ($1, $2)
+      ON CONFLICT (key) DO NOTHING
+      `,
+      [key, roleId]
+    );
+  }
 }
 
 async function addSubscriber(userId) {
@@ -537,14 +766,96 @@ function getLegacyChannelTargets(options) {
   ];
 }
 
-async function ensureSetting(key, defaults) {
+function apiSuccess(res, data = [], { page = 1, pageSize = 50, total = null, extra = {}, status = 200 } = {}) {
+  const pagination = {
+    page,
+    pageSize,
+    total: total === null ? (Array.isArray(data) ? data.length : 0) : total,
+  };
+
+  return res.status(status).json({
+    ok: true,
+    data,
+    pagination,
+    ...extra,
+  });
+}
+
+function createApiError(code, message, status = 400) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = status;
+  return error;
+}
+
+function getEncryptionKey() {
+  const raw = process.env.DISCORD_SETTINGS_ENCRYPTION_KEY;
+  if (!raw) return null;
+
+  if (/^[a-f0-9]{64}$/i.test(raw)) {
+    return Buffer.from(raw, 'hex');
+  }
+
+  return crypto.createHash('sha256').update(raw).digest();
+}
+
+function encryptSecretValue(value) {
+  const key = getEncryptionKey();
+  if (!key) {
+    throw createApiError(
+      'ENCRYPTION_KEY_MISSING',
+      'DISCORD_SETTINGS_ENCRYPTION_KEY is not configured',
+      500
+    );
+  }
+
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([
+    cipher.update(String(value), 'utf8'),
+    cipher.final(),
+  ]);
+  const authTag = cipher.getAuthTag();
+
+  return {
+    encryptedValue: encrypted.toString('base64'),
+    iv: iv.toString('base64'),
+    authTag: authTag.toString('base64'),
+    lastFour: String(value).slice(-4),
+  };
+}
+
+function getSecretDefinition(secretKey) {
+  return SECRET_DEFINITIONS[secretKey] || {
+    label: secretKey,
+    requiresRestart: false,
+  };
+}
+
+function serializeSecret(row) {
+  const definition = getSecretDefinition(row.key);
+
+  return {
+    id: row.id,
+    key: row.key,
+    label: definition.label,
+    configured: Boolean(row.configured),
+    lastFour: row.last_four || null,
+    requiresRestart: Boolean(row.requires_restart),
+    updatedBy: row.updated_by || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function ensureSetting(key, defaults, groupKey = 'general') {
   await pool.query(
     `
-    INSERT INTO discord_settings (key, value)
-    VALUES ($1, $2::jsonb)
+    INSERT INTO discord_settings (key, value, group_key)
+    VALUES ($1, $2::jsonb, $3)
     ON CONFLICT (key) DO NOTHING
     `,
-    [key, JSON.stringify(defaults)]
+    [key, JSON.stringify(defaults), groupKey]
   );
 }
 
@@ -577,6 +888,87 @@ async function updateSetting(key, defaults, patch) {
   );
 
   return next;
+}
+
+async function setSetting(key, value, groupKey = 'general') {
+  await pool.query(
+    `
+    INSERT INTO discord_settings (key, value, group_key, updated_at)
+    VALUES ($1, $2::jsonb, $3, NOW())
+    ON CONFLICT (key)
+    DO UPDATE SET value = EXCLUDED.value, group_key = EXCLUDED.group_key, updated_at = NOW()
+    `,
+    [key, JSON.stringify(value), groupKey]
+  );
+
+  return value;
+}
+
+async function setSettings(settings, groupKey = 'general') {
+  const entries = Object.entries(settings || {});
+  for (const [key, value] of entries) {
+    await setSetting(key, value, groupKey);
+  }
+  return settings;
+}
+
+async function deleteSetting(key) {
+  const result = await pool.query(
+    `DELETE FROM discord_settings WHERE key = $1`,
+    [key]
+  );
+  return result.rowCount > 0;
+}
+
+async function getSettingsByGroup(groupKey) {
+  const result = await pool.query(
+    `SELECT key, value, group_key, created_at, updated_at FROM discord_settings WHERE group_key = $1 ORDER BY key ASC`,
+    [groupKey]
+  );
+
+  return result.rows.map(row => ({
+    key: row.key,
+    value: row.value,
+    group: row.group_key,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+async function getChannelMappings() {
+  const result = await pool.query(
+    `SELECT key, channel_id, updated_by, created_at, updated_at FROM discord_channel_mappings ORDER BY key ASC`
+  );
+  const values = { ...DEFAULT_CHANNEL_MAPPINGS };
+
+  for (const row of result.rows) {
+    values[row.key] = row.channel_id;
+  }
+
+  return values;
+}
+
+async function getRoleMappings() {
+  const result = await pool.query(
+    `SELECT key, role_id, updated_by, created_at, updated_at FROM discord_role_mappings ORDER BY key ASC`
+  );
+  const values = { ...DEFAULT_ROLE_MAPPINGS };
+
+  for (const row of result.rows) {
+    values[row.key] = row.role_id;
+  }
+
+  return values;
+}
+
+async function resolveChannelMapping(key) {
+  const mappings = await getChannelMappings();
+  return mappings[key] || null;
+}
+
+async function resolveRoleMapping(key) {
+  const mappings = await getRoleMappings();
+  return mappings[key] || null;
 }
 
 async function logActivity({
@@ -622,24 +1014,35 @@ async function getWelcomedCount() {
 }
 
 async function getGuild() {
-  if (!process.env.DISCORD_GUILD_ID || !client.isReady()) return null;
-  return client.guilds.cache.get(process.env.DISCORD_GUILD_ID)
-    || client.guilds.fetch(process.env.DISCORD_GUILD_ID).catch(() => null);
+  if (!client.isReady()) return null;
+  const core = await getSetting('core', DEFAULT_CORE_SETTINGS);
+  const guildId = core.guildId || process.env.DISCORD_GUILD_ID;
+  if (!guildId) return null;
+  return client.guilds.cache.get(guildId)
+    || client.guilds.fetch(guildId).catch(() => null);
 }
 
 async function getOverviewPayload() {
-  const [subscriberCount, welcomedUsersCount, stats, lastVideoId, lastYoutubePostAt, guild] =
+  const [subscriberCount, welcomedUsersCount, stats, lastVideoId, lastYoutubePostAt, lastYoutubeCheckAt, guild, managedPages, activeCampaigns, autoReactionRules, recentActivity] =
     await Promise.all([
       getSubscriberCount(),
       getWelcomedCount(),
       getStats(),
       getAppState('lastVideoId'),
       getAppState('lastYoutubePostAt'),
+      getAppState('lastYoutubeCheckAt'),
       getGuild(),
+      pool.query(`SELECT COUNT(*)::int AS count FROM discord_managed_posts`).then(r => r.rows[0]?.count || 0).catch(() => null),
+      pool.query(`SELECT COUNT(*)::int AS count FROM discord_dm_campaigns WHERE status IN ('QUEUED', 'RUNNING', 'PAUSED')`).then(r => r.rows[0]?.count || 0).catch(() => null),
+      pool.query(`SELECT COUNT(*)::int AS count FROM discord_auto_reaction_rules WHERE enabled = true`).then(r => r.rows[0]?.count || 0).catch(() => null),
+      pool.query(`SELECT type, action, created_at, metadata FROM discord_activity_logs ORDER BY created_at DESC LIMIT 10`).then(r => r.rows).catch(() => []),
     ]);
 
   return {
     ok: true,
+    apiHealthy: true,
+    databaseConnected: true,
+    discordConnected: client.isReady(),
     service: 'discord-bot',
     botOnline: client.isReady(),
     botStatus: client.isReady() ? 'ONLINE' : 'STARTING',
@@ -664,12 +1067,30 @@ async function getOverviewPayload() {
     lastAlertAt: stats.lastAlertAt || null,
     lastYoutubeVideoId: lastVideoId,
     lastYoutubePostAt,
+    lastYoutubeCheckAt,
+    managedPages,
+    activeCampaigns,
+    autoReactionRules,
+    recentActivity,
     queue: {
       youtubePollingActive: Boolean(youtubeIntervalHandle),
-      activeJobs: 0,
+      activeJobs: activeCampaigns || 0,
     },
     generatedAt: new Date().toISOString(),
   };
+}
+
+function channelTypeName(type) {
+  const names = {
+    [ChannelType.GuildCategory]: 'CATEGORY',
+    [ChannelType.GuildText]: 'TEXT',
+    [ChannelType.GuildAnnouncement]: 'ANNOUNCEMENT',
+    [ChannelType.GuildForum]: 'FORUM',
+    [ChannelType.GuildVoice]: 'VOICE',
+    [ChannelType.GuildStageVoice]: 'STAGE',
+  };
+
+  return names[type] || String(type);
 }
 
 async function listAccessibleChannels() {
@@ -687,20 +1108,103 @@ async function listAccessibleChannels() {
       return {
         id: channel.id,
         name: channel.name,
-        type: channel.type,
+        type: channelTypeName(channel.type),
+        rawType: channel.type,
         parentCategoryId: parent?.id || null,
         parentCategoryName: parent?.name || null,
         position: channel.rawPosition ?? channel.position ?? null,
         canView: permissions?.has(PermissionFlagsBits.ViewChannel) || false,
         canSend: permissions?.has(PermissionFlagsBits.SendMessages) || false,
+        canSendThreads: permissions?.has(PermissionFlagsBits.SendMessagesInThreads) || false,
         canEmbed: permissions?.has(PermissionFlagsBits.EmbedLinks) || false,
         canAttachFiles: permissions?.has(PermissionFlagsBits.AttachFiles) || false,
         canAddReactions: permissions?.has(PermissionFlagsBits.AddReactions) || false,
+        canReadHistory: permissions?.has(PermissionFlagsBits.ReadMessageHistory) || false,
         canMentionEveryone: permissions?.has(PermissionFlagsBits.MentionEveryone) || false,
+        canUseExternalEmojis: permissions?.has(PermissionFlagsBits.UseExternalEmojis) || false,
+        canManageMessages: permissions?.has(PermissionFlagsBits.ManageMessages) || false,
         managed: Boolean(channel.managed),
       };
     })
     .sort((a, b) => (a.position || 0) - (b.position || 0));
+}
+
+async function syncAccessibleChannels() {
+  const guild = await getGuild();
+  const channels = await listAccessibleChannels();
+
+  for (const channel of channels) {
+    await pool.query(
+      `
+      INSERT INTO discord_channels (
+        id, guild_id, name, type, parent_category_id, parent_category_name, position,
+        can_view, can_send, can_send_threads, can_embed, can_attach_files, can_add_reactions,
+        can_read_history, can_mention_everyone, can_use_external_emojis, can_manage_messages,
+        managed, raw, synced_at, updated_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        $8, $9, $10, $11, $12, $13,
+        $14, $15, $16, $17,
+        $18, $19::jsonb, NOW(), NOW()
+      )
+      ON CONFLICT (id)
+      DO UPDATE SET
+        guild_id = EXCLUDED.guild_id,
+        name = EXCLUDED.name,
+        type = EXCLUDED.type,
+        parent_category_id = EXCLUDED.parent_category_id,
+        parent_category_name = EXCLUDED.parent_category_name,
+        position = EXCLUDED.position,
+        can_view = EXCLUDED.can_view,
+        can_send = EXCLUDED.can_send,
+        can_send_threads = EXCLUDED.can_send_threads,
+        can_embed = EXCLUDED.can_embed,
+        can_attach_files = EXCLUDED.can_attach_files,
+        can_add_reactions = EXCLUDED.can_add_reactions,
+        can_read_history = EXCLUDED.can_read_history,
+        can_mention_everyone = EXCLUDED.can_mention_everyone,
+        can_use_external_emojis = EXCLUDED.can_use_external_emojis,
+        can_manage_messages = EXCLUDED.can_manage_messages,
+        managed = EXCLUDED.managed,
+        raw = EXCLUDED.raw,
+        synced_at = NOW(),
+        updated_at = NOW()
+      `,
+      [
+        channel.id,
+        guild?.id || process.env.DISCORD_GUILD_ID || null,
+        channel.name,
+        channel.type,
+        channel.parentCategoryId,
+        channel.parentCategoryName,
+        channel.position,
+        channel.canView,
+        channel.canSend,
+        channel.canSendThreads,
+        channel.canEmbed,
+        channel.canAttachFiles,
+        channel.canAddReactions,
+        channel.canReadHistory,
+        channel.canMentionEveryone,
+        channel.canUseExternalEmojis,
+        channel.canManageMessages,
+        channel.managed,
+        JSON.stringify(channel),
+      ]
+    );
+  }
+
+  return {
+    guild: guild ? {
+      id: guild.id,
+      name: guild.name,
+      icon: guild.iconURL?.() || null,
+      memberCount: guild.memberCount || null,
+    } : null,
+    channels,
+    groups: groupChannelsByCategory(channels),
+  };
 }
 
 function groupChannelsByCategory(channels) {
@@ -753,14 +1257,16 @@ async function listSubscribers({ page = 1, limit = 50, search = '' }) {
     pool.query(countQuery, search ? [like] : []),
   ]);
 
+  const subscribers = [];
+  for (const row of rowsResult.rows) {
+    subscribers.push(await serializeSubscriberRow(row));
+  }
+
   return {
     page: safePage,
     limit: safeLimit,
     total: countResult.rows[0]?.count || 0,
-    subscribers: rowsResult.rows.map(row => ({
-      discordUserId: row.user_id,
-      createdAt: row.created_at,
-    })),
+    subscribers,
   };
 }
 
@@ -772,9 +1278,46 @@ async function getSubscriber(discordUserId) {
 
   if (!result.rowCount) return null;
 
+  return serializeSubscriberRow(result.rows[0]);
+}
+
+async function getSubscriberDmStats(discordUserId) {
+  const result = await pool.query(
+    `
+    SELECT
+      COUNT(*)::int AS total_attempts,
+      COUNT(*) FILTER (WHERE status = 'sent')::int AS total_successes,
+      COUNT(*) FILTER (WHERE status <> 'sent')::int AS total_failures,
+      MAX(created_at) AS last_dm_date,
+      (ARRAY_AGG(status ORDER BY created_at DESC))[1] AS last_dm_result
+    FROM discord_dm_deliveries
+    WHERE discord_user_id = $1
+    `,
+    [discordUserId]
+  );
+
+  return result.rows[0] || {};
+}
+
+async function serializeSubscriberRow(row) {
+  let user = null;
+  if (client.isReady()) {
+    user = await client.users.fetch(row.user_id).catch(() => null);
+  }
+  const dmStats = await getSubscriberDmStats(row.user_id);
+
   return {
-    discordUserId: result.rows[0].user_id,
-    createdAt: result.rows[0].created_at,
+    discordUserId: row.user_id,
+    username: user?.username || null,
+    displayName: user?.globalName || user?.username || null,
+    avatar: user?.displayAvatarURL?.() || null,
+    dateSubscribed: row.created_at,
+    source: 'subscriber_table',
+    lastDmDate: dmStats.last_dm_date || null,
+    lastDmResult: dmStats.last_dm_result || null,
+    totalAttempts: dmStats.total_attempts || 0,
+    totalSuccesses: dmStats.total_successes || 0,
+    totalFailures: dmStats.total_failures || 0,
   };
 }
 
@@ -922,7 +1465,8 @@ async function addReactions(message, reactions) {
 async function fetchTextChannel(channelId) {
   const channel = await client.channels.fetch(channelId);
 
-  if (!channel || channel.type !== ChannelType.GuildText) {
+  const sendableTypes = new Set([ChannelType.GuildText, ChannelType.GuildAnnouncement]);
+  if (!channel || !sendableTypes.has(channel.type)) {
     const error = new Error('Channel not found or is not a text channel');
     error.status = 404;
     throw error;
@@ -1090,9 +1634,10 @@ async function registerCommands() {
 
 async function postYoutubeVideo(video) {
   const settings = await getSetting('youtube', DEFAULT_YOUTUBE_SETTINGS);
+  const mappedYoutubeChannel = await resolveChannelMapping('youtube');
   const channelIds = Array.isArray(settings.destinationChannelIds) && settings.destinationChannelIds.length
     ? settings.destinationChannelIds
-    : [process.env.DISCORD_CHANNEL_ID].filter(Boolean);
+    : [mappedYoutubeChannel || process.env.DISCORD_CHANNEL_ID].filter(Boolean);
   const embed = buildYoutubeEmbed(video);
   let postedCount = 0;
   let failedCount = 0;
@@ -1143,6 +1688,7 @@ async function checkYoutubeFeed() {
   try {
     const settings = await getSetting('youtube', DEFAULT_YOUTUBE_SETTINGS);
     if (!settings.enabled) return;
+    await setAppState('lastYoutubeCheckAt', new Date().toISOString());
 
     const feedUrl = settings.feedUrl
       || `https://www.youtube.com/feeds/videos.xml?channel_id=${settings.youtubeChannelId || process.env.YOUTUBE_CHANNEL_ID}`;
@@ -1217,7 +1763,7 @@ async function sendEmbedToSubscribers(embed) {
     VALUES ($1, $2, $3)
     RETURNING id
     `,
-    ['Broadcast DM', 'running', subscribers.length]
+    ['Broadcast DM', 'RUNNING', subscribers.length]
   );
   const campaignId = campaignResult.rows[0]?.id || null;
 
@@ -1274,7 +1820,7 @@ async function sendEmbedToSubscribers(embed) {
           completed_at = NOW()
       WHERE id = $4
       `,
-      ['completed', successCount, failCount, campaignId]
+      [failCount ? 'PARTIAL' : 'COMPLETED', successCount, failCount, campaignId]
     );
   }
 
@@ -1286,10 +1832,151 @@ async function sendEmbedToSubscribers(embed) {
   };
 }
 
+async function createDmCampaign({ name, announcementId = null, recipientIds = [], payload = {}, actor = null }) {
+  const result = await pool.query(
+    `
+    INSERT INTO discord_dm_campaigns
+      (announcement_id, name, status, total_count, metadata)
+    VALUES ($1, $2, 'QUEUED', $3, $4::jsonb)
+    RETURNING *
+    `,
+    [
+      announcementId,
+      name || 'Subscriber DM Campaign',
+      recipientIds.length,
+      JSON.stringify({ recipientIds, payload, actor }),
+    ]
+  );
+
+  return result.rows[0];
+}
+
+async function processDmCampaign(campaignId) {
+  const campaignResult = await pool.query(
+    `SELECT * FROM discord_dm_campaigns WHERE id = $1`,
+    [campaignId]
+  );
+  if (!campaignResult.rowCount) return;
+
+  const campaign = campaignResult.rows[0];
+  if (!['QUEUED', 'RUNNING'].includes(campaign.status)) return;
+
+  const metadata = campaign.metadata || {};
+  const recipientIds = Array.isArray(metadata.recipientIds) ? metadata.recipientIds : [];
+  const payload = metadata.payload || {};
+  const embed = buildPayloadEmbed(payload);
+  const components = buildButtonRows(payload.buttons || []);
+  let successCount = campaign.success_count || 0;
+  let failureCount = campaign.failure_count || 0;
+
+  await pool.query(
+    `
+    UPDATE discord_dm_campaigns
+    SET status = 'RUNNING', started_at = COALESCE(started_at, NOW()), updated_at = NOW()
+    WHERE id = $1
+    `,
+    [campaignId]
+  );
+
+  for (const userId of recipientIds) {
+    const already = await pool.query(
+      `SELECT 1 FROM discord_dm_deliveries WHERE campaign_id = $1 AND discord_user_id = $2 LIMIT 1`,
+      [campaignId, userId]
+    );
+    if (already.rowCount) continue;
+
+    try {
+      const user = await client.users.fetch(userId);
+      await user.send({
+        embeds: [embed],
+        components: components.length ? components : [buildWebsiteButtonRow()],
+      });
+      successCount += 1;
+      await pool.query(
+        `
+        INSERT INTO discord_dm_deliveries (campaign_id, discord_user_id, status)
+        VALUES ($1, $2, 'sent')
+        `,
+        [campaignId, userId]
+      );
+    } catch (error) {
+      failureCount += 1;
+      await pool.query(
+        `
+        INSERT INTO discord_dm_deliveries (campaign_id, discord_user_id, status, error_message)
+        VALUES ($1, $2, 'failed', $3)
+        `,
+        [campaignId, userId, error.message]
+      );
+    }
+
+    await pool.query(
+      `
+      UPDATE discord_dm_campaigns
+      SET success_count = $2,
+          failure_count = $3,
+          last_processed_recipient = $4,
+          updated_at = NOW()
+      WHERE id = $1
+      `,
+      [campaignId, successCount, failureCount, userId]
+    );
+    await sleep(DEFAULT_CORE_SETTINGS.delays.dmMs);
+  }
+
+  const finalStatus = failureCount > 0
+    ? (successCount > 0 ? 'PARTIAL' : 'FAILED')
+    : 'COMPLETED';
+
+  await pool.query(
+    `
+    UPDATE discord_dm_campaigns
+    SET status = $2,
+        success_count = $3,
+        failure_count = $4,
+        updated_at = NOW(),
+        completed_at = NOW()
+    WHERE id = $1
+    `,
+    [campaignId, finalStatus, successCount, failureCount]
+  );
+
+  await incrementStats({
+    totalDmSent: successCount,
+    totalDmFailed: failureCount,
+  });
+
+  await logActivity({
+    type: 'campaign',
+    action: 'completed',
+    source: 'bot',
+    entityType: 'dm_campaign',
+    entityId: String(campaignId),
+    metadata: { successCount, failureCount, finalStatus },
+  });
+}
+
+function startDmCampaign(campaignId) {
+  setImmediate(() => {
+    processDmCampaign(campaignId).catch(error => {
+      console.error(`DM campaign ${campaignId} failed:`, error.message);
+      pool.query(
+        `UPDATE discord_dm_campaigns SET status = 'FAILED', updated_at = NOW() WHERE id = $1`,
+        [campaignId]
+      ).catch(() => {});
+    });
+  });
+}
+
 async function sendEmbedToSelectedChannels(embed, options) {
+  const mappings = await getChannelMappings();
   const channelTargets = Array.isArray(options.channelIds)
     ? options.channelIds.map(id => ({ enabled: true, id, label: id }))
-    : getLegacyChannelTargets(options);
+    : [
+      { enabled: options.general, id: mappings.general || process.env.GENERAL_CHANNEL_ID, label: 'general' },
+      { enabled: options.announcements, id: mappings.announcements || process.env.ANNOUNCEMENTS_CHANNEL_ID, label: 'announcements' },
+      { enabled: options.activePromotions, id: mappings.active_promotions || process.env.ACTIVE_PROMOTIONS_CHANNEL_ID, label: 'active-promotions' },
+    ];
 
   let postedCount = 0;
   let failedCount = 0;
@@ -1385,7 +2072,9 @@ async function sendWelcomeFlow(member) {
   const components = [buildSubscriptionButtons(), ...(extraButtonRows.length ? extraButtonRows : [buildWebsiteButtonRow()])];
 
   try {
-    const welcomeChannelId = settings.welcomeChannelId || process.env.WELCOME_CHANNEL_ID;
+    const welcomeChannelId = settings.welcomeChannelId
+      || await resolveChannelMapping('welcome')
+      || process.env.WELCOME_CHANNEL_ID;
     if (settings.sendChannelMessage && welcomeChannelId) {
       const channel = await client.channels.fetch(welcomeChannelId);
       if (channel && channel.type === ChannelType.GuildText) {
@@ -1494,18 +2183,43 @@ function requireCrmAuth(req, res, next) {
   if (!process.env.CRM_SHARED_SECRET) {
     return res.status(500).json({
       ok: false,
-      error: 'CRM_SHARED_SECRET is not configured',
+      error: {
+        code: 'CRM_SECRET_MISSING',
+        message: 'CRM authentication is not configured',
+      },
     });
   }
 
   const authHeader = req.get('authorization') || '';
   const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   const providedSecret = req.get('x-crm-secret') || bearerToken || req.query.secret;
+  const timestamp = req.get('x-crm-timestamp');
+  const signature = req.get('x-crm-signature');
+
+  if (timestamp && signature) {
+    const timestampMs = Number(timestamp);
+    const withinWindow = Number.isFinite(timestampMs)
+      && Math.abs(Date.now() - timestampMs) <= 5 * 60 * 1000;
+    const body = req.rawBody || '';
+    const expected = crypto
+      .createHmac('sha256', process.env.CRM_SHARED_SECRET)
+      .update(`${timestamp}.${req.method}.${req.originalUrl}.${body}`)
+      .digest('hex');
+    const validSignature = signature.length === expected.length
+      && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+
+    if (withinWindow && validSignature) {
+      return next();
+    }
+  }
 
   if (providedSecret !== process.env.CRM_SHARED_SECRET) {
     return res.status(401).json({
       ok: false,
-      error: 'Unauthorized',
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Unauthorized',
+      },
     });
   }
 
@@ -1513,10 +2227,21 @@ function requireCrmAuth(req, res, next) {
 }
 
 function sendApiError(error, req, res, next) {
-  console.error(`${req.method} ${req.path} failed:`, error);
+  console.error(`${req.method} ${req.path} failed:`, error.message);
+  logActivity({
+    type: 'api',
+    action: 'request_failed',
+    actor: req ? getActor(req) : null,
+    source: 'crm_api',
+    metadata: { method: req.method, path: req.path },
+    errorMessage: error.message,
+  }).catch(() => {});
   res.status(error.status || 500).json({
     ok: false,
-    error: error.status ? error.message : 'Server error',
+    error: {
+      code: error.code || (error.status ? 'BAD_REQUEST' : 'SERVER_ERROR'),
+      message: error.status ? error.message : 'Server error',
+    },
   });
 }
 
@@ -1538,12 +2263,21 @@ function normalizeAnnouncementPayload(body) {
   const channelIds = Array.isArray(body.channelIds)
     ? body.channelIds.map(id => normalizeDiscordId(id)).filter(Boolean)
     : [];
+  const mappedChannelKeys = Array.isArray(body.mappedChannels)
+    ? body.mappedChannels.filter(key => CHANNEL_MAPPING_KEYS.includes(key))
+    : [];
+  const selectedSubscriberIds = Array.isArray(body.selectedSubscriberIds)
+    ? body.selectedSubscriberIds.map(id => normalizeDiscordId(id)).filter(Boolean)
+    : [];
   const payload = {
     title: String(body.title || '').trim(),
     message: String(body.message || body.description || '').trim(),
     imageUrl: body.imageUrl || null,
+    thumbnail: body.thumbnail || null,
     channelIds,
+    mappedChannelKeys,
     sendDm: toBoolean(body.sendToSubscribersByDm ?? body.sendDm, false),
+    selectedSubscriberIds,
     pingEveryone: toBoolean(body.pingEveryone, false),
     buttons: sanitizeButtons(body.buttons || []),
     embedColor: body.embedColor || body.color || BRAND_COLOR,
@@ -1613,26 +2347,51 @@ async function sendAnnouncementById(id, req) {
     imageUrl: announcement.imageUrl,
     channelIds: announcement.channelIds,
   };
+  const mappedChannels = await getChannelMappings();
+  const mappedChannelIds = (payload.mappedChannelKeys || [])
+    .map(key => mappedChannels[key])
+    .filter(Boolean);
+  const channelIds = Array.from(new Set([...(payload.channelIds || []), ...mappedChannelIds]));
   const embed = buildPayloadEmbed(payload);
   const buttonRows = buildButtonRows(payload.buttons || []);
 
   try {
+    let campaign = null;
+    if (payload.sendDm) {
+      const recipientIds = payload.selectedSubscriberIds?.length
+        ? payload.selectedSubscriberIds
+        : await getSubscriberIds();
+      campaign = await createDmCampaign({
+        name: `Announcement ${id}`,
+        announcementId: id,
+        recipientIds,
+        payload,
+        actor: req ? getActor(req) : null,
+      });
+      startDmCampaign(campaign.id);
+    }
+
     const result = await runBroadcast({
       embed,
-      sendDM: Boolean(payload.sendDm),
-      channelIds: payload.channelIds,
+      sendDM: false,
+      channelIds,
       pingEveryone: Boolean(payload.pingEveryone),
       components: buttonRows.length ? buttonRows : undefined,
       reactions: payload.reactions || ANNOUNCE_REACTIONS,
     });
+    result.dmCampaign = campaign ? {
+      id: campaign.id,
+      status: campaign.status,
+      totalCount: campaign.total_count,
+    } : null;
 
     await pool.query(
       `
       UPDATE discord_announcements
-      SET status = 'sent', sent_at = NOW(), updated_at = NOW(), last_error = NULL
+      SET status = $2, sent_at = NOW(), updated_at = NOW(), last_error = NULL
       WHERE id = $1
       `,
-      [id]
+      [id, campaign ? 'QUEUED' : 'COMPLETED']
     );
 
     await logActivity({
@@ -1670,7 +2429,7 @@ async function sendAnnouncementById(id, req) {
 
 async function createAnnouncement(body, req) {
   const payload = normalizeAnnouncementPayload(body);
-  const status = payload.sendImmediately && !payload.saveAsDraft ? 'queued' : 'draft';
+  const status = payload.sendImmediately && !payload.saveAsDraft ? 'QUEUED' : 'DRAFT';
 
   const result = await pool.query(
     `
@@ -1753,14 +2512,203 @@ function normalizeManagedPayload(body) {
   return payload;
 }
 
+async function getAutoReactionRule(id) {
+  const ruleResult = await pool.query(
+    `SELECT * FROM discord_auto_reaction_rules WHERE id = $1`,
+    [id]
+  );
+  if (!ruleResult.rowCount) return null;
+
+  const [usersResult, channelsResult] = await Promise.all([
+    pool.query(`SELECT discord_user_id FROM discord_auto_reaction_users WHERE rule_id = $1 ORDER BY id ASC`, [id]),
+    pool.query(`SELECT discord_channel_id FROM discord_auto_reaction_channels WHERE rule_id = $1 ORDER BY id ASC`, [id]),
+  ]);
+
+  const rule = ruleResult.rows[0];
+  return {
+    id: rule.id,
+    name: rule.name,
+    enabled: rule.enabled,
+    reactions: rule.reactions || [],
+    reactToBots: rule.react_to_bots,
+    reactToMembers: rule.react_to_members,
+    delayMs: rule.delay_ms,
+    users: usersResult.rows.map(row => row.discord_user_id),
+    channels: channelsResult.rows.map(row => row.discord_channel_id),
+    createdAt: rule.created_at,
+    updatedAt: rule.updated_at,
+  };
+}
+
+async function listAutoReactionRules() {
+  const result = await pool.query(
+    `SELECT id FROM discord_auto_reaction_rules ORDER BY updated_at DESC`
+  );
+  const rules = [];
+  for (const row of result.rows) {
+    rules.push(await getAutoReactionRule(row.id));
+  }
+  return rules.filter(Boolean);
+}
+
+function normalizeAutoReactionPayload(body, existing = {}) {
+  const name = String(body.name ?? existing.name ?? '').trim();
+  if (!name) throw createApiError('AUTO_REACTION_NAME_REQUIRED', 'Rule name is required', 400);
+
+  const reactions = sanitizeReactions(body.reactions ?? existing.reactions ?? [], []).slice(0, 10);
+  if (reactions.length < 1) {
+    throw createApiError('AUTO_REACTION_REACTIONS_REQUIRED', 'At least one reaction is required', 400);
+  }
+
+  const users = Array.isArray(body.users || body.discordUserIds)
+    ? (body.users || body.discordUserIds).map(id => normalizeDiscordId(id)).filter(Boolean)
+    : (existing.users || []);
+  const channels = Array.isArray(body.channels || body.discordChannelIds)
+    ? (body.channels || body.discordChannelIds).map(id => normalizeDiscordId(id)).filter(Boolean)
+    : (existing.channels || []);
+
+  return {
+    name,
+    enabled: toBoolean(body.enabled, existing.enabled ?? true),
+    reactions,
+    reactToBots: toBoolean(body.reactToBots ?? body.react_to_bots, existing.reactToBots ?? false),
+    reactToMembers: toBoolean(body.reactToMembers ?? body.react_to_members, existing.reactToMembers ?? true),
+    delayMs: Math.max(0, Math.min(Number(body.delayMs ?? existing.delayMs ?? 0) || 0, 30000)),
+    users,
+    channels,
+  };
+}
+
+async function saveAutoReactionRule(payload, id = null) {
+  let ruleId = id;
+  if (ruleId) {
+    await pool.query(
+      `
+      UPDATE discord_auto_reaction_rules
+      SET name = $2,
+          enabled = $3,
+          reactions = $4::jsonb,
+          react_to_bots = $5,
+          react_to_members = $6,
+          delay_ms = $7,
+          updated_at = NOW()
+      WHERE id = $1
+      `,
+      [
+        ruleId,
+        payload.name,
+        payload.enabled,
+        JSON.stringify(payload.reactions),
+        payload.reactToBots,
+        payload.reactToMembers,
+        payload.delayMs,
+      ]
+    );
+    await pool.query(`DELETE FROM discord_auto_reaction_users WHERE rule_id = $1`, [ruleId]);
+    await pool.query(`DELETE FROM discord_auto_reaction_channels WHERE rule_id = $1`, [ruleId]);
+  } else {
+    const result = await pool.query(
+      `
+      INSERT INTO discord_auto_reaction_rules
+        (name, enabled, reactions, react_to_bots, react_to_members, delay_ms)
+      VALUES ($1, $2, $3::jsonb, $4, $5, $6)
+      RETURNING id
+      `,
+      [
+        payload.name,
+        payload.enabled,
+        JSON.stringify(payload.reactions),
+        payload.reactToBots,
+        payload.reactToMembers,
+        payload.delayMs,
+      ]
+    );
+    ruleId = result.rows[0].id;
+  }
+
+  for (const userId of payload.users) {
+    await pool.query(
+      `INSERT INTO discord_auto_reaction_users (rule_id, discord_user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [ruleId, userId]
+    );
+  }
+
+  for (const channelId of payload.channels) {
+    await pool.query(
+      `INSERT INTO discord_auto_reaction_channels (rule_id, discord_channel_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [ruleId, channelId]
+    );
+  }
+
+  return getAutoReactionRule(ruleId);
+}
+
+async function processAutoReactionRules(message) {
+  if (!message?.author) return;
+  if (message.author.id === client.user?.id) return;
+
+  const rules = await listAutoReactionRules();
+  for (const rule of rules) {
+    if (!rule.enabled) continue;
+    if (message.author.bot && !rule.reactToBots) continue;
+    if (!message.author.bot && !rule.reactToMembers) continue;
+    if (rule.users.length && !rule.users.includes(message.author.id)) continue;
+    if (rule.channels.length && !rule.channels.includes(message.channelId)) continue;
+
+    const inserted = await pool.query(
+      `
+      INSERT INTO discord_auto_reaction_events (message_id, rule_id)
+      VALUES ($1, $2)
+      ON CONFLICT DO NOTHING
+      `,
+      [message.id, rule.id]
+    );
+    if (!inserted.rowCount) continue;
+
+    if (rule.delayMs) await sleep(rule.delayMs);
+
+    let successCount = 0;
+    let failureCount = 0;
+    for (const reaction of rule.reactions) {
+      try {
+        await message.react(reaction);
+        successCount += 1;
+        await sleep(300);
+      } catch (error) {
+        failureCount += 1;
+        console.log(`Auto reaction failed (${reaction}): ${error.message}`);
+      }
+    }
+
+    await logActivity({
+      type: 'auto_reaction',
+      action: failureCount ? 'partial' : 'reacted',
+      source: 'bot',
+      discordUserId: message.author.id,
+      entityType: 'auto_reaction_rule',
+      entityId: String(rule.id),
+      metadata: {
+        messageId: message.id,
+        channelId: message.channelId,
+        username: message.author.username || null,
+        successCount,
+        failureCount,
+      },
+      errorMessage: failureCount ? `${failureCount} reaction(s) failed` : null,
+    });
+  }
+}
+
 client.on('messageCreate', async message => {
-  if (message.author.bot) return;
+  if (message.author.id === client.user?.id) return;
 
   const isVIP = VIP_USERS.includes(message.author.id);
 
-  if (isVIP && message.mentions.everyone) {
+  if (!message.author.bot && isVIP && message.mentions.everyone) {
     await addReactions(message, VIP_REACTIONS);
   }
+
+  await processAutoReactionRules(message);
 });
 
 client.on('interactionCreate', async interaction => {
@@ -2051,7 +2999,12 @@ function startCRMStatsServer() {
   const port = process.env.PORT || 3000;
   const router = express.Router();
 
-  app.use(express.json({ limit: '1mb' }));
+  app.use(express.json({
+    limit: '1mb',
+    verify: (req, res, buf) => {
+      req.rawBody = buf.toString('utf8');
+    },
+  }));
 
   app.get('/health', (req, res) => {
     res.json({
@@ -2128,48 +3081,79 @@ function startCRMStatsServer() {
   router.use(requireCrmAuth);
 
   router.get('/health', asyncRoute(async (req, res) => {
-    res.json(await getOverviewPayload());
+    const overview = await getOverviewPayload();
+    apiSuccess(res, overview, { extra: overview });
   }));
 
   router.get('/overview', asyncRoute(async (req, res) => {
-    res.json(await getOverviewPayload());
+    const overview = await getOverviewPayload();
+    apiSuccess(res, overview, { extra: overview });
   }));
 
   router.get('/stats', asyncRoute(async (req, res) => {
-    res.json(await getOverviewPayload());
+    const overview = await getOverviewPayload();
+    apiSuccess(res, overview, { extra: overview });
   }));
 
   router.get('/channels', asyncRoute(async (req, res) => {
     const channels = await listAccessibleChannels();
-    res.json({
-      ok: true,
-      channels,
-      groups: groupChannelsByCategory(channels),
-      generatedAt: new Date().toISOString(),
+    apiSuccess(res, channels, {
+      pageSize: channels.length || 50,
+      total: channels.length,
+      extra: {
+        channels,
+        groups: groupChannelsByCategory(channels),
+        generatedAt: new Date().toISOString(),
+      },
     });
   }));
 
   router.post('/channels/sync', asyncRoute(async (req, res) => {
-    const channels = await listAccessibleChannels();
+    const sync = await syncAccessibleChannels();
     await logActivity({
       type: 'channels',
       action: 'synced',
       actor: getActor(req),
       source: 'crm_api',
-      metadata: { count: channels.length },
+      metadata: { count: sync.channels.length },
     });
-    res.json({
-      ok: true,
-      channels,
-      groups: groupChannelsByCategory(channels),
-      generatedAt: new Date().toISOString(),
+    apiSuccess(res, sync.channels, {
+      pageSize: sync.channels.length || 50,
+      total: sync.channels.length,
+      extra: {
+        guild: sync.guild,
+        channels: sync.channels,
+        groups: sync.groups,
+        generatedAt: new Date().toISOString(),
+      },
     });
   }));
 
+  router.get('/server', asyncRoute(async (req, res) => {
+    const sync = await syncAccessibleChannels();
+    const server = {
+      guild: sync.guild,
+      categories: sync.channels.filter(channel => channel.type === 'CATEGORY'),
+      textChannels: sync.channels.filter(channel => channel.type === 'TEXT'),
+      announcementChannels: sync.channels.filter(channel => channel.type === 'ANNOUNCEMENT'),
+      forumChannels: sync.channels.filter(channel => channel.type === 'FORUM'),
+      voiceChannels: sync.channels.filter(channel => ['VOICE', 'STAGE'].includes(channel.type)),
+      groups: sync.groups,
+    };
+    apiSuccess(res, server, { extra: server });
+  }));
+
   router.get('/subscribers', asyncRoute(async (req, res) => {
-    res.json({
-      ok: true,
-      ...(await listSubscribers(req.query)),
+    const result = await listSubscribers({
+      page: req.query.page,
+      limit: req.query.limit || req.query.pageSize,
+      search: req.query.search,
+    });
+    apiSuccess(res, result.subscribers, {
+      page: result.page,
+      pageSize: result.limit,
+      total: result.total,
+      extra: { subscribers: result.subscribers },
     });
   }));
 
@@ -2177,9 +3161,9 @@ function startCRMStatsServer() {
     const discordUserId = requireDiscordId(req.params.discordUserId);
     const subscriber = await getSubscriber(discordUserId);
     if (!subscriber) {
-      return res.status(404).json({ ok: false, error: 'Subscriber not found' });
+      throw createApiError('SUBSCRIBER_NOT_FOUND', 'Subscriber not found', 404);
     }
-    res.json({ ok: true, subscriber });
+    apiSuccess(res, subscriber, { extra: { subscriber } });
   }));
 
   router.post('/subscribers', asyncRoute(async (req, res) => {
@@ -2195,10 +3179,10 @@ function startCRMStatsServer() {
         discordUserId,
       });
     }
-    res.status(added ? 201 : 200).json({
-      ok: true,
-      added,
-      subscriber: await getSubscriber(discordUserId),
+    const subscriber = await getSubscriber(discordUserId);
+    apiSuccess(res, subscriber, {
+      status: added ? 201 : 200,
+      extra: { added, subscriber },
     });
   }));
 
@@ -2215,12 +3199,13 @@ function startCRMStatsServer() {
         discordUserId,
       });
     }
-    res.json({ ok: true, removed });
+    apiSuccess(res, { removed }, { extra: { removed } });
   }));
 
   router.get('/announcements', asyncRoute(async (req, res) => {
-    const limit = parsePositiveInt(req.query.limit, 50, 200);
-    const offset = (parsePositiveInt(req.query.page, 1) - 1) * limit;
+    const page = parsePositiveInt(req.query.page, 1);
+    const limit = parsePositiveInt(req.query.limit || req.query.pageSize, 50, 200);
+    const offset = (page - 1) * limit;
     const result = await pool.query(
       `
       SELECT id, title, message, image_url, payload, status, last_error, created_at, updated_at, sent_at
@@ -2231,10 +3216,7 @@ function startCRMStatsServer() {
       [limit, offset]
     );
     const countResult = await pool.query(`SELECT COUNT(*)::int AS count FROM discord_announcements`);
-    res.json({
-      ok: true,
-      total: countResult.rows[0]?.count || 0,
-      announcements: result.rows.map(row => ({
+    const announcements = result.rows.map(row => ({
         id: row.id,
         title: row.title,
         message: row.message,
@@ -2245,30 +3227,40 @@ function startCRMStatsServer() {
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         sentAt: row.sent_at,
-      })),
+      }));
+    apiSuccess(res, announcements, {
+      page,
+      pageSize: limit,
+      total: countResult.rows[0]?.count || 0,
+      extra: { announcements },
     });
   }));
 
   router.post('/announcements', asyncRoute(async (req, res) => {
     const result = await createAnnouncement(req.body, req);
-    res.status(201).json({ ok: true, ...result });
+    apiSuccess(res, result.announcement, {
+      status: 201,
+      extra: { ...result },
+    });
   }));
 
   router.get('/announcements/:id', asyncRoute(async (req, res) => {
     const announcement = await getAnnouncement(req.params.id);
     if (!announcement) {
-      return res.status(404).json({ ok: false, error: 'Announcement not found' });
+      throw createApiError('ANNOUNCEMENT_NOT_FOUND', 'Announcement not found', 404);
     }
-    res.json({ ok: true, announcement });
+    apiSuccess(res, announcement, { extra: { announcement } });
   }));
 
   router.post('/announcements/:id/send', asyncRoute(async (req, res) => {
     const result = await sendAnnouncementById(req.params.id, req);
-    res.json({ ok: true, result, announcement: await getAnnouncement(req.params.id) });
+    const announcement = await getAnnouncement(req.params.id);
+    apiSuccess(res, result, { extra: { result, announcement } });
   }));
 
   router.get('/settings/welcome', asyncRoute(async (req, res) => {
-    res.json({ ok: true, settings: await getSetting('welcome', DEFAULT_WELCOME_SETTINGS) });
+    const settings = await getSetting('welcome', DEFAULT_WELCOME_SETTINGS);
+    apiSuccess(res, settings, { extra: { settings } });
   }));
 
   router.patch('/settings/welcome', asyncRoute(async (req, res) => {
@@ -2302,7 +3294,7 @@ function startCRMStatsServer() {
 
     const settings = await updateSetting('welcome', DEFAULT_WELCOME_SETTINGS, patch);
     await logActivity({ type: 'settings', action: 'welcome_updated', actor: getActor(req), source: 'crm_api' });
-    res.json({ ok: true, settings });
+    apiSuccess(res, settings, { extra: { settings } });
   }));
 
   router.post('/settings/welcome/test', asyncRoute(async (req, res) => {
@@ -2339,11 +3331,14 @@ function startCRMStatsServer() {
       source: 'crm_api',
       metadata: { channelId, messageId: message?.id || null },
     });
-    res.json({ ok: true, sent: Boolean(message), messageId: message?.id || null });
+    apiSuccess(res, { sent: Boolean(message), messageId: message?.id || null }, {
+      extra: { sent: Boolean(message), messageId: message?.id || null },
+    });
   }));
 
   router.get('/settings/youtube', asyncRoute(async (req, res) => {
-    res.json({ ok: true, settings: await getSetting('youtube', DEFAULT_YOUTUBE_SETTINGS) });
+    const settings = await getSetting('youtube', DEFAULT_YOUTUBE_SETTINGS);
+    apiSuccess(res, settings, { extra: { settings } });
   }));
 
   router.patch('/settings/youtube', asyncRoute(async (req, res) => {
@@ -2377,7 +3372,7 @@ function startCRMStatsServer() {
 
     const settings = await updateSetting('youtube', DEFAULT_YOUTUBE_SETTINGS, patch);
     await logActivity({ type: 'settings', action: 'youtube_updated', actor: getActor(req), source: 'crm_api' });
-    res.json({ ok: true, settings });
+    apiSuccess(res, settings, { extra: { settings } });
   }));
 
   router.post('/settings/youtube/test', asyncRoute(async (req, res) => {
@@ -2396,7 +3391,7 @@ function startCRMStatsServer() {
       posts.push({ channelId, messageId: msg.id });
     }
     await logActivity({ type: 'youtube', action: 'test', actor: getActor(req), source: 'crm_api', metadata: { posts } });
-    res.json({ ok: true, sent: posts.length > 0, posts });
+    apiSuccess(res, posts, { total: posts.length, extra: { sent: posts.length > 0, posts } });
   }));
 
   router.get('/youtube/history', asyncRoute(async (req, res) => {
@@ -2410,24 +3405,315 @@ function startCRMStatsServer() {
       `,
       [parsePositiveInt(req.query.limit, 50, 200)]
     );
-    res.json({ ok: true, history: result.rows });
+    apiSuccess(res, result.rows, { total: result.rows.length, extra: { history: result.rows } });
+  }));
+
+  router.get('/settings', asyncRoute(async (req, res) => {
+    const result = await pool.query(
+      `SELECT key, value, group_key, created_at, updated_at FROM discord_settings ORDER BY group_key ASC, key ASC`
+    );
+    const settings = result.rows.map(row => ({
+      key: row.key,
+      value: row.value,
+      group: row.group_key,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+    apiSuccess(res, settings, { total: settings.length, extra: { settings } });
+  }));
+
+  router.get('/settings/group/:groupKey', asyncRoute(async (req, res) => {
+    const settings = await getSettingsByGroup(req.params.groupKey);
+    apiSuccess(res, settings, { total: settings.length, extra: { settings } });
+  }));
+
+  router.patch('/settings', asyncRoute(async (req, res) => {
+    const groupKey = req.body.group || 'general';
+    const settings = await setSettings(req.body.settings || {}, groupKey);
+    await logActivity({ type: 'settings', action: 'bulk_updated', actor: getActor(req), source: 'crm_api', metadata: { groupKey, keys: Object.keys(settings) } });
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.delete('/settings/:key', asyncRoute(async (req, res) => {
+    const deleted = await deleteSetting(req.params.key);
+    await logActivity({ type: 'settings', action: 'deleted', actor: getActor(req), source: 'crm_api', entityType: 'setting', entityId: req.params.key });
+    apiSuccess(res, { deleted }, { extra: { deleted } });
+  }));
+
+  router.get('/channel-mappings', asyncRoute(async (req, res) => {
+    const mappings = await getChannelMappings();
+    apiSuccess(res, mappings, { extra: { mappings } });
+  }));
+
+  router.patch('/channel-mappings', asyncRoute(async (req, res) => {
+    const actor = getActor(req);
+    const patch = req.body.mappings || req.body;
+    const updated = {};
+
+    for (const [key, value] of Object.entries(patch)) {
+      if (!CHANNEL_MAPPING_KEYS.includes(key)) continue;
+      const channelId = value ? requireDiscordId(value, `${key} channel ID`) : null;
+      if (channelId) {
+        const channel = await fetchTextChannel(channelId);
+        const permissions = client.user ? channel.permissionsFor(client.user) : null;
+        if (permissions && !permissions.has(PermissionFlagsBits.SendMessages)) {
+          throw createApiError('CHANNEL_PERMISSION_MISSING', `Bot cannot send messages in ${channel.name}`, 400);
+        }
+      }
+      await pool.query(
+        `
+        INSERT INTO discord_channel_mappings (key, channel_id, updated_by, updated_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (key)
+        DO UPDATE SET channel_id = EXCLUDED.channel_id, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+        `,
+        [key, channelId, actor]
+      );
+      updated[key] = channelId;
+    }
+
+    await setSetting('channel_mappings', await getChannelMappings(), 'mappings');
+    await logActivity({ type: 'mapping', action: 'channels_updated', actor, source: 'crm_api', metadata: updated });
+    const mappings = await getChannelMappings();
+    apiSuccess(res, mappings, { extra: { mappings } });
+  }));
+
+  router.get('/role-mappings', asyncRoute(async (req, res) => {
+    const mappings = await getRoleMappings();
+    apiSuccess(res, mappings, { extra: { mappings } });
+  }));
+
+  router.patch('/role-mappings', asyncRoute(async (req, res) => {
+    const actor = getActor(req);
+    const patch = req.body.mappings || req.body;
+    const updated = {};
+
+    for (const [key, value] of Object.entries(patch)) {
+      if (!ROLE_MAPPING_KEYS.includes(key)) continue;
+      const roleId = value ? requireDiscordId(value, `${key} role ID`) : null;
+      if (roleId) {
+        const guild = await getGuild();
+        if (guild) {
+          const role = await guild.roles.fetch(roleId).catch(() => null);
+          if (!role) {
+            throw createApiError('ROLE_NOT_FOUND', `Role mapping ${key} does not exist in Discord`, 400);
+          }
+        }
+      }
+      await pool.query(
+        `
+        INSERT INTO discord_role_mappings (key, role_id, updated_by, updated_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (key)
+        DO UPDATE SET role_id = EXCLUDED.role_id, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+        `,
+        [key, roleId, actor]
+      );
+      updated[key] = roleId;
+    }
+
+    await setSetting('role_mappings', await getRoleMappings(), 'mappings');
+    await logActivity({ type: 'mapping', action: 'roles_updated', actor, source: 'crm_api', metadata: updated });
+    const mappings = await getRoleMappings();
+    apiSuccess(res, mappings, { extra: { mappings } });
+  }));
+
+  router.get('/secrets', asyncRoute(async (req, res) => {
+    const result = await pool.query(`SELECT * FROM discord_secret_settings ORDER BY key ASC`);
+    const existing = new Map(result.rows.map(row => [row.key, serializeSecret(row)]));
+    const secrets = Object.keys(SECRET_DEFINITIONS).map(key => existing.get(key) || {
+      key,
+      label: SECRET_DEFINITIONS[key].label,
+      configured: false,
+      lastFour: null,
+      requiresRestart: SECRET_DEFINITIONS[key].requiresRestart,
+      updatedBy: null,
+      createdAt: null,
+      updatedAt: null,
+    });
+    apiSuccess(res, secrets, { total: secrets.length, extra: { secrets } });
+  }));
+
+  router.post('/secrets', asyncRoute(async (req, res) => {
+    const secretKey = String(req.body.key || '').trim();
+    req.params.key = secretKey;
+    req.body.value = req.body.value;
+    if (!secretKey) throw createApiError('SECRET_KEY_REQUIRED', 'Secret key is required', 400);
+    if (!req.body.value) throw createApiError('SECRET_VALUE_REQUIRED', 'Secret value is required', 400);
+
+    const encrypted = encryptSecretValue(req.body.value);
+    const definition = getSecretDefinition(secretKey);
+    const result = await pool.query(
+      `
+      INSERT INTO discord_secret_settings
+        (key, encrypted_value, iv, auth_tag, last_four, configured, requires_restart, updated_by, updated_at)
+      VALUES ($1, $2, $3, $4, $5, true, $6, $7, NOW())
+      ON CONFLICT (key)
+      DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value,
+                    iv = EXCLUDED.iv,
+                    auth_tag = EXCLUDED.auth_tag,
+                    last_four = EXCLUDED.last_four,
+                    configured = true,
+                    requires_restart = EXCLUDED.requires_restart,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = NOW()
+      RETURNING *
+      `,
+      [
+        secretKey,
+        encrypted.encryptedValue,
+        encrypted.iv,
+        encrypted.authTag,
+        encrypted.lastFour,
+        definition.requiresRestart,
+        getActor(req),
+      ]
+    );
+    await logActivity({ type: 'secret', action: 'upserted', actor: getActor(req), source: 'crm_api', entityType: 'secret', entityId: secretKey, metadata: { requiresRestart: definition.requiresRestart } });
+    const secret = serializeSecret(result.rows[0]);
+    apiSuccess(res, secret, { status: 201, extra: { secret } });
+  }));
+
+  router.put('/secrets/:key', asyncRoute(async (req, res) => {
+    const secretKey = String(req.params.key || '').trim();
+    const value = req.body.value;
+    if (!secretKey) throw createApiError('SECRET_KEY_REQUIRED', 'Secret key is required', 400);
+    if (!value) throw createApiError('SECRET_VALUE_REQUIRED', 'Secret value is required', 400);
+
+    const encrypted = encryptSecretValue(value);
+    const definition = getSecretDefinition(secretKey);
+    const result = await pool.query(
+      `
+      INSERT INTO discord_secret_settings
+        (key, encrypted_value, iv, auth_tag, last_four, configured, requires_restart, updated_by, updated_at)
+      VALUES ($1, $2, $3, $4, $5, true, $6, $7, NOW())
+      ON CONFLICT (key)
+      DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value,
+                    iv = EXCLUDED.iv,
+                    auth_tag = EXCLUDED.auth_tag,
+                    last_four = EXCLUDED.last_four,
+                    configured = true,
+                    requires_restart = EXCLUDED.requires_restart,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = NOW()
+      RETURNING *
+      `,
+      [
+        secretKey,
+        encrypted.encryptedValue,
+        encrypted.iv,
+        encrypted.authTag,
+        encrypted.lastFour,
+        definition.requiresRestart,
+        getActor(req),
+      ]
+    );
+    await logActivity({ type: 'secret', action: 'upserted', actor: getActor(req), source: 'crm_api', entityType: 'secret', entityId: secretKey, metadata: { requiresRestart: definition.requiresRestart } });
+    const secret = serializeSecret(result.rows[0]);
+    apiSuccess(res, secret, { extra: { secret } });
+  }));
+
+  router.delete('/secrets/:key', asyncRoute(async (req, res) => {
+    const result = await pool.query(
+      `
+      UPDATE discord_secret_settings
+      SET encrypted_value = NULL,
+          iv = NULL,
+          auth_tag = NULL,
+          last_four = NULL,
+          configured = false,
+          updated_by = $2,
+          updated_at = NOW()
+      WHERE key = $1
+      RETURNING *
+      `,
+      [req.params.key, getActor(req)]
+    );
+    await logActivity({ type: 'secret', action: 'deleted', actor: getActor(req), source: 'crm_api', entityType: 'secret', entityId: req.params.key });
+    apiSuccess(res, result.rowCount ? serializeSecret(result.rows[0]) : { key: req.params.key, configured: false });
+  }));
+
+  router.post('/secrets/:key/test', asyncRoute(async (req, res) => {
+    const result = await pool.query(
+      `SELECT * FROM discord_secret_settings WHERE key = $1`,
+      [req.params.key]
+    );
+    const configured = result.rowCount ? Boolean(result.rows[0].configured) : false;
+    apiSuccess(res, { key: req.params.key, configured, decryptable: configured && Boolean(getEncryptionKey()) });
+  }));
+
+  router.get('/auto-reactions', asyncRoute(async (req, res) => {
+    const rules = await listAutoReactionRules();
+    apiSuccess(res, rules, { total: rules.length, extra: { rules } });
+  }));
+
+  router.post('/auto-reactions', asyncRoute(async (req, res) => {
+    const payload = normalizeAutoReactionPayload(req.body);
+    const rule = await saveAutoReactionRule(payload);
+    await logActivity({ type: 'auto_reaction', action: 'created', actor: getActor(req), source: 'crm_api', entityType: 'auto_reaction_rule', entityId: String(rule.id) });
+    apiSuccess(res, rule, { status: 201, extra: { rule } });
+  }));
+
+  router.get('/auto-reactions/:id', asyncRoute(async (req, res) => {
+    const rule = await getAutoReactionRule(req.params.id);
+    if (!rule) throw createApiError('AUTO_REACTION_NOT_FOUND', 'Auto-reaction rule not found', 404);
+    apiSuccess(res, rule, { extra: { rule } });
+  }));
+
+  router.patch('/auto-reactions/:id', asyncRoute(async (req, res) => {
+    const existing = await getAutoReactionRule(req.params.id);
+    if (!existing) throw createApiError('AUTO_REACTION_NOT_FOUND', 'Auto-reaction rule not found', 404);
+    const payload = normalizeAutoReactionPayload(req.body, existing);
+    const rule = await saveAutoReactionRule(payload, req.params.id);
+    await logActivity({ type: 'auto_reaction', action: 'updated', actor: getActor(req), source: 'crm_api', entityType: 'auto_reaction_rule', entityId: String(rule.id) });
+    apiSuccess(res, rule, { extra: { rule } });
+  }));
+
+  router.delete('/auto-reactions/:id', asyncRoute(async (req, res) => {
+    const result = await pool.query(`DELETE FROM discord_auto_reaction_rules WHERE id = $1`, [req.params.id]);
+    await logActivity({ type: 'auto_reaction', action: 'deleted', actor: getActor(req), source: 'crm_api', entityType: 'auto_reaction_rule', entityId: String(req.params.id) });
+    apiSuccess(res, { deleted: result.rowCount > 0 }, { extra: { deleted: result.rowCount > 0 } });
+  }));
+
+  router.post('/auto-reactions/:id/test', asyncRoute(async (req, res) => {
+    const rule = await getAutoReactionRule(req.params.id);
+    if (!rule) throw createApiError('AUTO_REACTION_NOT_FOUND', 'Auto-reaction rule not found', 404);
+    const channelId = req.body.channelId ? requireDiscordId(req.body.channelId, 'Channel ID') : rule.channels[0];
+    if (!channelId) throw createApiError('CHANNEL_REQUIRED', 'A channel ID is required for test', 400);
+    const channel = await fetchTextChannel(channelId);
+    const message = await channel.send({
+      content: 'Auto-reaction test',
+      allowedMentions: { parse: [] },
+    });
+    await addReactions(message, rule.reactions);
+    await logActivity({ type: 'auto_reaction', action: 'test', actor: getActor(req), source: 'crm_api', entityType: 'auto_reaction_rule', entityId: String(rule.id), metadata: { channelId, messageId: message.id } });
+    apiSuccess(res, { channelId, messageId: message.id, reactions: rule.reactions });
   }));
 
   router.get('/templates', asyncRoute(async (req, res) => {
+    const page = parsePositiveInt(req.query.page, 1);
+    const limit = parsePositiveInt(req.query.limit || req.query.pageSize, 100, 200);
+    const offset = (page - 1) * limit;
     const result = await pool.query(
-      `SELECT * FROM discord_templates ORDER BY updated_at DESC LIMIT $1`,
-      [parsePositiveInt(req.query.limit, 100, 200)]
+      `SELECT * FROM discord_templates ORDER BY updated_at DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
     );
-    res.json({ ok: true, templates: result.rows });
+    const countResult = await pool.query(`SELECT COUNT(*)::int AS count FROM discord_templates`);
+    apiSuccess(res, result.rows, {
+      page,
+      pageSize: limit,
+      total: countResult.rows[0]?.count || 0,
+      extra: { templates: result.rows },
+    });
   }));
 
   router.post('/templates', asyncRoute(async (req, res) => {
     const type = String(req.body.type || '').toUpperCase();
     if (!TEMPLATE_TYPES.has(type)) {
-      return res.status(400).json({ ok: false, error: 'Invalid template type' });
+      throw createApiError('INVALID_TEMPLATE_TYPE', 'Invalid template type', 400);
     }
     const name = String(req.body.name || '').trim();
-    if (!name) return res.status(400).json({ ok: false, error: 'Template name is required' });
+    if (!name) throw createApiError('TEMPLATE_NAME_REQUIRED', 'Template name is required', 400);
     const result = await pool.query(
       `
       INSERT INTO discord_templates (type, name, content)
@@ -2437,24 +3723,24 @@ function startCRMStatsServer() {
       [type, name, JSON.stringify(req.body.content || {})]
     );
     await logActivity({ type: 'template', action: 'created', actor: getActor(req), source: 'crm_api', entityType: 'template', entityId: String(result.rows[0].id) });
-    res.status(201).json({ ok: true, template: result.rows[0] });
+    apiSuccess(res, result.rows[0], { status: 201, extra: { template: result.rows[0] } });
   }));
 
   router.get('/templates/:id', asyncRoute(async (req, res) => {
     const result = await pool.query(`SELECT * FROM discord_templates WHERE id = $1`, [req.params.id]);
-    if (!result.rowCount) return res.status(404).json({ ok: false, error: 'Template not found' });
-    res.json({ ok: true, template: result.rows[0] });
+    if (!result.rowCount) throw createApiError('TEMPLATE_NOT_FOUND', 'Template not found', 404);
+    apiSuccess(res, result.rows[0], { extra: { template: result.rows[0] } });
   }));
 
   router.patch('/templates/:id', asyncRoute(async (req, res) => {
     const current = await pool.query(`SELECT * FROM discord_templates WHERE id = $1`, [req.params.id]);
-    if (!current.rowCount) return res.status(404).json({ ok: false, error: 'Template not found' });
+    if (!current.rowCount) throw createApiError('TEMPLATE_NOT_FOUND', 'Template not found', 404);
     const next = {
       type: req.body.type ? String(req.body.type).toUpperCase() : current.rows[0].type,
       name: req.body.name || current.rows[0].name,
       content: req.body.content || current.rows[0].content,
     };
-    if (!TEMPLATE_TYPES.has(next.type)) return res.status(400).json({ ok: false, error: 'Invalid template type' });
+    if (!TEMPLATE_TYPES.has(next.type)) throw createApiError('INVALID_TEMPLATE_TYPE', 'Invalid template type', 400);
     const result = await pool.query(
       `
       UPDATE discord_templates
@@ -2465,20 +3751,20 @@ function startCRMStatsServer() {
       [req.params.id, next.type, next.name, JSON.stringify(next.content)]
     );
     await logActivity({ type: 'template', action: 'updated', actor: getActor(req), source: 'crm_api', entityType: 'template', entityId: String(req.params.id) });
-    res.json({ ok: true, template: result.rows[0] });
+    apiSuccess(res, result.rows[0], { extra: { template: result.rows[0] } });
   }));
 
   router.delete('/templates/:id', asyncRoute(async (req, res) => {
     const result = await pool.query(`DELETE FROM discord_templates WHERE id = $1`, [req.params.id]);
     await logActivity({ type: 'template', action: 'deleted', actor: getActor(req), source: 'crm_api', entityType: 'template', entityId: String(req.params.id) });
-    res.json({ ok: true, deleted: result.rowCount > 0 });
+    apiSuccess(res, { deleted: result.rowCount > 0 }, { extra: { deleted: result.rowCount > 0 } });
   }));
 
   router.get('/managed-posts', asyncRoute(async (req, res) => {
     const result = await pool.query(
       `SELECT * FROM discord_managed_posts ORDER BY display_order ASC, updated_at DESC`
     );
-    res.json({ ok: true, managedPosts: result.rows });
+    apiSuccess(res, result.rows, { total: result.rows.length, extra: { managedPosts: result.rows } });
   }));
 
   router.post('/managed-posts', asyncRoute(async (req, res) => {
@@ -2501,18 +3787,18 @@ function startCRMStatsServer() {
       ]
     );
     await logActivity({ type: 'managed_post', action: 'created', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(result.rows[0].id) });
-    res.status(201).json({ ok: true, managedPost: result.rows[0] });
+    apiSuccess(res, result.rows[0], { status: 201, extra: { managedPost: result.rows[0] } });
   }));
 
   router.get('/managed-posts/:id', asyncRoute(async (req, res) => {
     const result = await pool.query(`SELECT * FROM discord_managed_posts WHERE id = $1`, [req.params.id]);
-    if (!result.rowCount) return res.status(404).json({ ok: false, error: 'Managed post not found' });
-    res.json({ ok: true, managedPost: result.rows[0] });
+    if (!result.rowCount) throw createApiError('MANAGED_POST_NOT_FOUND', 'Managed post not found', 404);
+    apiSuccess(res, result.rows[0], { extra: { managedPost: result.rows[0] } });
   }));
 
   router.patch('/managed-posts/:id', asyncRoute(async (req, res) => {
     const current = await pool.query(`SELECT * FROM discord_managed_posts WHERE id = $1`, [req.params.id]);
-    if (!current.rowCount) return res.status(404).json({ ok: false, error: 'Managed post not found' });
+    if (!current.rowCount) throw createApiError('MANAGED_POST_NOT_FOUND', 'Managed post not found', 404);
     const merged = { ...current.rows[0].payload, ...req.body };
     const payload = normalizeManagedPayload({
       ...merged,
@@ -2546,12 +3832,12 @@ function startCRMStatsServer() {
       ]
     );
     await logActivity({ type: 'managed_post', action: 'updated', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(req.params.id) });
-    res.json({ ok: true, managedPost: result.rows[0] });
+    apiSuccess(res, result.rows[0], { extra: { managedPost: result.rows[0] } });
   }));
 
   router.post('/managed-posts/:id/publish', asyncRoute(async (req, res) => {
     const result = await pool.query(`SELECT * FROM discord_managed_posts WHERE id = $1`, [req.params.id]);
-    if (!result.rowCount) return res.status(404).json({ ok: false, error: 'Managed post not found' });
+    if (!result.rowCount) throw createApiError('MANAGED_POST_NOT_FOUND', 'Managed post not found', 404);
     const managedPost = result.rows[0];
     const payload = managedPost.payload || {};
 
@@ -2588,7 +3874,7 @@ function startCRMStatsServer() {
         [req.params.id, message.id]
       );
       await logActivity({ type: 'managed_post', action: 'published', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(req.params.id), metadata: { messageId: message.id } });
-      res.json({ ok: true, managedPost: updateResult.rows[0] });
+      apiSuccess(res, updateResult.rows[0], { extra: { managedPost: updateResult.rows[0] } });
     } catch (error) {
       await pool.query(
         `UPDATE discord_managed_posts SET status = 'error', last_error = $2, updated_at = NOW() WHERE id = $1`,
@@ -2600,20 +3886,20 @@ function startCRMStatsServer() {
 
   router.post('/managed-posts/:id/sync-reactions', asyncRoute(async (req, res) => {
     const result = await pool.query(`SELECT * FROM discord_managed_posts WHERE id = $1`, [req.params.id]);
-    if (!result.rowCount) return res.status(404).json({ ok: false, error: 'Managed post not found' });
+    if (!result.rowCount) throw createApiError('MANAGED_POST_NOT_FOUND', 'Managed post not found', 404);
     const managedPost = result.rows[0];
-    if (!managedPost.message_id) return res.status(400).json({ ok: false, error: 'Managed post has no Discord message ID' });
+    if (!managedPost.message_id) throw createApiError('MANAGED_POST_UNPUBLISHED', 'Managed post has no Discord message ID', 400);
     const channel = await fetchTextChannel(managedPost.channel_id);
     const message = await channel.messages.fetch(managedPost.message_id);
     await addReactions(message, sanitizeReactions(managedPost.payload?.reactions, DEFAULT_MANAGED_REACTIONS).slice(0, 10));
     await logActivity({ type: 'managed_post', action: 'reaction_sync', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(req.params.id) });
-    res.json({ ok: true, synced: true });
+    apiSuccess(res, { synced: true }, { extra: { synced: true } });
   }));
 
   router.delete('/managed-posts/:id', asyncRoute(async (req, res) => {
     const result = await pool.query(`DELETE FROM discord_managed_posts WHERE id = $1`, [req.params.id]);
     await logActivity({ type: 'managed_post', action: 'deleted', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(req.params.id) });
-    res.json({ ok: true, deleted: result.rowCount > 0 });
+    apiSuccess(res, { deleted: result.rowCount > 0 }, { extra: { deleted: result.rowCount > 0 } });
   }));
 
   router.get('/activity', asyncRoute(async (req, res) => {
@@ -2626,7 +3912,7 @@ function startCRMStatsServer() {
       `,
       [parsePositiveInt(req.query.limit, 100, 500)]
     );
-    res.json({ ok: true, activity: result.rows });
+    apiSuccess(res, result.rows, { total: result.rows.length, extra: { activity: result.rows } });
   }));
 
   router.get('/dm-campaigns', asyncRoute(async (req, res) => {
@@ -2634,17 +3920,22 @@ function startCRMStatsServer() {
       `SELECT * FROM discord_dm_campaigns ORDER BY created_at DESC LIMIT $1`,
       [parsePositiveInt(req.query.limit, 100, 500)]
     );
-    res.json({ ok: true, dmCampaigns: result.rows });
+    apiSuccess(res, result.rows, { total: result.rows.length, extra: { dmCampaigns: result.rows } });
   }));
 
   router.get('/dm-campaigns/:id', asyncRoute(async (req, res) => {
     const campaign = await pool.query(`SELECT * FROM discord_dm_campaigns WHERE id = $1`, [req.params.id]);
-    if (!campaign.rowCount) return res.status(404).json({ ok: false, error: 'DM campaign not found' });
+    if (!campaign.rowCount) throw createApiError('DM_CAMPAIGN_NOT_FOUND', 'DM campaign not found', 404);
     const deliveries = await pool.query(
       `SELECT * FROM discord_dm_deliveries WHERE campaign_id = $1 ORDER BY created_at DESC`,
       [req.params.id]
     );
-    res.json({ ok: true, dmCampaign: campaign.rows[0], deliveries: deliveries.rows });
+    apiSuccess(res, {
+      dmCampaign: campaign.rows[0],
+      deliveries: deliveries.rows,
+    }, {
+      extra: { dmCampaign: campaign.rows[0], deliveries: deliveries.rows },
+    });
   }));
 
   app.use('/api/crm/discord', router);
