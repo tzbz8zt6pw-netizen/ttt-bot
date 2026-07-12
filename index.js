@@ -1381,12 +1381,12 @@ function looksLikeShort(item) {
   );
 }
 
-function buildWebsiteButtonRow() {
+function buildWebsiteButtonRow({ label = 'Visit Website', url = WEBSITE_URL } = {}) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setLabel('Visit Website')
+      .setLabel(String(label || 'Visit Website').slice(0, 80))
       .setStyle(ButtonStyle.Link)
-      .setURL(WEBSITE_URL)
+      .setURL(validateUrl(url || WEBSITE_URL, 'Button URL'))
   );
 }
 
@@ -1648,7 +1648,7 @@ async function postYoutubeVideo(video) {
         channelId,
         {
           embed,
-          components: [buildWebsiteButtonRow()],
+          components: [buildWebsiteButtonRow({ label: 'Watch video', url: video.link })],
           pingEveryone: false,
         },
         settings.reactionSet || YT_REACTIONS
@@ -3387,7 +3387,7 @@ function startCRMStatsServer() {
     });
     const posts = [];
     for (const channelId of channelIds) {
-      const msg = await sendToChannelId(channelId, { embed, components: [buildWebsiteButtonRow()] }, YT_REACTIONS);
+      const msg = await sendToChannelId(channelId, { embed, components: [buildWebsiteButtonRow({ label: 'Watch video', url: req.body.link || 'https://youtube.com' })] }, YT_REACTIONS);
       posts.push({ channelId, messageId: msg.id });
     }
     await logActivity({ type: 'youtube', action: 'test', actor: getActor(req), source: 'crm_api', metadata: { posts } });
