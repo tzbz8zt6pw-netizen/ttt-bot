@@ -757,18 +757,22 @@ function managedDescriptionFromPayload(payload) {
   if (payload.description) lines.push(String(payload.description).trim());
 
   for (const block of sanitizeManagedBlocks(payload.contentBlocks)) {
-    if (!block.content || block.type === 'button_group') continue;
-    if (block.type === 'heading') lines.push(`**${block.content}**`);
-    else if (block.type === 'note') lines.push(`> ${block.content.replace(/\n/g, '\n> ')}`);
-    else lines.push(block.content);
+    const blockLines = [];
+    if (block.content && block.type !== 'button_group') {
+      if (block.type === 'heading') blockLines.push(`**${block.content}**`);
+      else if (block.type === 'note') blockLines.push(`> ${block.content.replace(/\n/g, '\n> ')}`);
+      else blockLines.push(block.content);
+    }
+    const inlineLinks = sanitizeButtons(block.buttons || []).map(button => `[${button.label}](${button.url})`);
+    if (inlineLinks.length) blockLines.push(inlineLinks.join('  |  '));
+    if (blockLines.length) lines.push(blockLines.join('\n'));
   }
 
   return lines.filter(Boolean).join('\n\n').slice(0, 4096);
 }
 
 function managedButtonsFromPayload(payload) {
-  const blockButtons = sanitizeManagedBlocks(payload.contentBlocks).flatMap(block => block.buttons || []);
-  return sanitizeButtons([...(payload.buttons || []), ...blockButtons]).slice(0, 25);
+  return sanitizeButtons(payload.buttons || []).slice(0, 25);
 }
 
 function buildButtonRows(buttons) {
