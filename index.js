@@ -35,6 +35,7 @@ const parser = new Parser();
 let youtubeIntervalHandle = null;
 let lastHeartbeatAt = null;
 let youtubeCheckRunning = false;
+let subscriberHydrationRunning = false;
 
 const BRAND_COLOR = 0xf35023;
 const BRAND_NAME = 'TTT Markets';
@@ -226,6 +227,9 @@ async function initDB() {
 
   await pool.query(`ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'subscribed';`);
   await pool.query(`ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS unsubscribed_at TIMESTAMPTZ;`);
+  await pool.query(`ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS username TEXT;`);
+  await pool.query(`ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS display_name TEXT;`);
+  await pool.query(`ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS avatar_url TEXT;`);
   await pool.query(`UPDATE subscribers SET status = 'subscribed' WHERE status IS NULL OR status = '';`);
 
   await pool.query(`
@@ -517,18 +521,97 @@ async function initDB() {
   }
 }
 
-async function addSubscriber(userId) {
+function subscriberIdentity(user = null) {
+  return {
+    username: user?.username || user?.user?.username || null,
+    displayName: user?.globalName || user?.displayName || user?.user?.globalName || user?.user?.username || user?.username || null,
+    avatarUrl: typeof user?.displayAvatarURL === 'function'
+      ? user.displayAvatarURL()
+      : typeof user?.user?.displayAvatarURL === 'function'
+        ? user.user.displayAvatarURL()
+        : null,
+  };
+}
+
+function cachedDiscordIdentity(userId) {
+  const guild = client.guilds.cache.get(process.env.DISCORD_GUILD_ID) || client.guilds.cache.first();
+  const member = guild?.members?.cache?.get?.(userId) || null;
+  const user = member?.user || client.users.cache.get(userId) || null;
+  return subscriberIdentity(member || user);
+}
+
+async function storeSubscriberIdentity(userId, user) {
+  const identity = subscriberIdentity(user);
+  if (!identity.username && !identity.displayName && !identity.avatarUrl) return;
+  await pool.query(
+    `
+    UPDATE subscribers
+    SET username = COALESCE($2, username),
+        display_name = COALESCE($3, display_name),
+        avatar_url = COALESCE($4, avatar_url)
+    WHERE user_id = $1
+    `,
+    [userId, identity.username, identity.displayName, identity.avatarUrl]
+  );
+}
+
+async function hydrateSubscriberIdentities(limit = 75) {
+  if (subscriberHydrationRunning || !client.isReady()) return;
+  subscriberHydrationRunning = true;
+  try {
+    const result = await pool.query(
+      `
+      SELECT user_id
+      FROM subscribers
+      WHERE username IS NULL OR display_name IS NULL
+      ORDER BY created_at DESC
+      LIMIT $1
+      `,
+      [limit]
+    );
+
+    for (const row of result.rows) {
+      const cached = cachedDiscordIdentity(row.user_id);
+      if (cached.username || cached.displayName || cached.avatarUrl) {
+        await storeSubscriberIdentity(row.user_id, cached);
+        continue;
+      }
+      const user = await client.users.fetch(row.user_id).catch(() => null);
+      if (user) await storeSubscriberIdentity(row.user_id, user);
+      await sleep(150);
+    }
+  } catch (error) {
+    console.log(`Subscriber identity hydration failed: ${error.message}`);
+  } finally {
+    subscriberHydrationRunning = false;
+  }
+}
+
+function scheduleSubscriberIdentityHydration(limit = 75) {
+  if (!client.isReady() || subscriberHydrationRunning) return;
+  setImmediate(() => hydrateSubscriberIdentities(limit));
+}
+
+async function addSubscriber(userId, user = null) {
+  const identity = subscriberIdentity(user);
   const result = await pool.query(
     `
-    INSERT INTO subscribers (user_id, status, unsubscribed_at)
-    VALUES ($1, 'subscribed', NULL)
+    INSERT INTO subscribers (user_id, status, unsubscribed_at, username, display_name, avatar_url)
+    VALUES ($1, 'subscribed', NULL, $2, $3, $4)
     ON CONFLICT (user_id)
-    DO UPDATE SET status = 'subscribed', unsubscribed_at = NULL
+    DO UPDATE SET status = 'subscribed',
+                  unsubscribed_at = NULL,
+                  username = COALESCE(EXCLUDED.username, subscribers.username),
+                  display_name = COALESCE(EXCLUDED.display_name, subscribers.display_name),
+                  avatar_url = COALESCE(EXCLUDED.avatar_url, subscribers.avatar_url)
     WHERE subscribers.status IS DISTINCT FROM 'subscribed'
        OR subscribers.unsubscribed_at IS NOT NULL
+       OR EXCLUDED.username IS NOT NULL
+       OR EXCLUDED.display_name IS NOT NULL
+       OR EXCLUDED.avatar_url IS NOT NULL
     RETURNING user_id
     `,
-    [userId]
+    [userId, identity.username, identity.displayName, identity.avatarUrl]
   );
 
   return result.rowCount > 0;
@@ -707,13 +790,13 @@ function validateUrl(value, label) {
   }
 }
 
-function normalizeButtonUrl(value, label = 'Button URL') {
+function normalizeButtonUrl(value, label = 'Button URL', { allowMailto = false } = {}) {
   const raw = String(value || '').trim();
   if (!raw) return null;
-  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) {
+  if (allowMailto && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) {
     return `mailto:${raw}`;
   }
-  if (/^mailto:/i.test(raw)) {
+  if (allowMailto && /^mailto:/i.test(raw)) {
     const email = raw.replace(/^mailto:/i, '').split('?')[0];
     if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return raw;
   }
@@ -736,14 +819,22 @@ function sanitizeReactions(reactions, fallback = []) {
     .slice(0, 20);
 }
 
-function sanitizeButtons(buttons) {
+function sanitizeButtons(buttons, options = {}) {
   if (!Array.isArray(buttons)) return [];
 
   return buttons
-    .map(button => ({
-      label: String(button?.label || '').trim(),
-      url: button?.url ? normalizeButtonUrl(button.url, 'Button URL') : null,
-    }))
+    .map(button => {
+      try {
+        return {
+          label: String(button?.label || '').trim(),
+          url: button?.url ? normalizeButtonUrl(button.url, 'Button URL', options) : null,
+        };
+      } catch (error) {
+        if (options.dropInvalid) return null;
+        throw error;
+      }
+    })
+    .filter(Boolean)
     .filter(button => button.label && button.url)
     .slice(0, 25);
 }
@@ -758,7 +849,7 @@ function sanitizeManagedBlocks(blocks) {
         id: String(block?.id || `block-${index + 1}`),
         type: ['heading', 'note', 'button_group'].includes(type) ? type : 'text',
         content: String(block?.content || '').trim(),
-        buttons: sanitizeButtons(block?.buttons || []),
+        buttons: sanitizeButtons(block?.buttons || [], { allowMailto: true, dropInvalid: true }),
       };
     })
     .filter(block => block.content || block.buttons.length)
@@ -776,7 +867,7 @@ function managedDescriptionFromPayload(payload) {
       else if (block.type === 'note') blockLines.push(`> ${block.content.replace(/\n/g, '\n> ')}`);
       else blockLines.push(block.content);
     }
-    const inlineLinks = sanitizeButtons(block.buttons || []).map(button => `[${button.label}](${button.url})`);
+    const inlineLinks = sanitizeButtons(block.buttons || [], { allowMailto: true, dropInvalid: true }).map(button => `[${button.label}](${button.url})`);
     if (inlineLinks.length) blockLines.push(inlineLinks.join('  |  '));
     if (blockLines.length) lines.push(blockLines.join('\n'));
   }
@@ -789,7 +880,7 @@ function managedButtonsFromPayload(payload) {
 }
 
 function buildButtonRows(buttons) {
-  const safeButtons = sanitizeButtons(buttons);
+  const safeButtons = sanitizeButtons(buttons, { dropInvalid: true });
   const rows = [];
 
   for (let i = 0; i < safeButtons.length; i += 5) {
@@ -1361,14 +1452,14 @@ async function listSubscribers({ page = 1, limit = 50, search = '', includeUsers
 
   const rowsQuery = search
     ? `
-      SELECT user_id, created_at, status, unsubscribed_at
+      SELECT user_id, created_at, status, unsubscribed_at, username, display_name, avatar_url
       FROM subscribers
       WHERE user_id ILIKE $1
       ORDER BY created_at DESC
       LIMIT $2 OFFSET $3
       `
     : `
-      SELECT user_id, created_at, status, unsubscribed_at
+      SELECT user_id, created_at, status, unsubscribed_at, username, display_name, avatar_url
       FROM subscribers
       ORDER BY created_at DESC
       LIMIT $1 OFFSET $2
@@ -1398,7 +1489,7 @@ async function listSubscribers({ page = 1, limit = 50, search = '', includeUsers
 
 async function getSubscriber(discordUserId) {
   const result = await pool.query(
-    `SELECT user_id, created_at, status, unsubscribed_at FROM subscribers WHERE user_id = $1`,
+    `SELECT user_id, created_at, status, unsubscribed_at, username, display_name, avatar_url FROM subscribers WHERE user_id = $1`,
     [discordUserId]
   );
 
@@ -1463,17 +1554,17 @@ async function getSubscriberDeliveryStats() {
 }
 
 async function serializeSubscriberRow(row, { includeUser = true } = {}) {
-  let user = null;
-  if (includeUser && client.isReady()) {
-    user = await client.users.fetch(row.user_id).catch(() => null);
-  }
+  const cached = includeUser && client.isReady() ? cachedDiscordIdentity(row.user_id) : {};
+  const username = cached.username || row.username || null;
+  const displayName = cached.displayName || row.display_name || username || null;
+  const avatarUrl = cached.avatarUrl || row.avatar_url || null;
   const dmStats = await getSubscriberDmStats(row.user_id);
 
   return {
     discordUserId: row.user_id,
-    username: user?.username || null,
-    displayName: user?.globalName || user?.username || null,
-    avatar: user?.displayAvatarURL?.() || null,
+    username,
+    displayName,
+    avatar: avatarUrl,
     status: row.status || 'subscribed',
     subscriptionStatus: row.status === 'unsubscribed' ? 'Unsubscribed' : 'Subscribed',
     dateSubscribed: row.created_at,
@@ -2256,7 +2347,7 @@ async function sendWelcomeFlow(member) {
   }
 
   if (settings.autoSubscribeNewMember) {
-    const added = await addSubscriber(member.id);
+    const added = await addSubscriber(member.id, member);
     if (added) {
       await logActivity({
         type: 'subscriber',
@@ -2628,7 +2719,7 @@ function normalizeManagedPayload(body) {
     thumbnail: body.thumbnail || body.payload?.thumbnail || null,
     footer: body.footer || body.payload?.footer || BRAND_FOOTER,
     embedColor: body.embedColor || body.color || body.payload?.embedColor || BRAND_COLOR,
-    buttons: sanitizeButtons(body.buttons || body.payload?.buttons || []),
+    buttons: sanitizeButtons(body.buttons || body.payload?.buttons || [], { dropInvalid: true }),
     contentBlocks,
     reactions: sanitizeReactions(body.reactions || body.payload?.reactions, DEFAULT_MANAGED_REACTIONS).slice(0, 10),
   };
@@ -2888,7 +2979,7 @@ client.on('interactionCreate', async interaction => {
     const userId = interaction.user.id;
 
     if (interaction.customId === 'subscribe_alerts') {
-      const added = await addSubscriber(userId);
+      const added = await addSubscriber(userId, interaction.user);
 
       await interaction.reply({
         content: added
@@ -3094,7 +3185,7 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.commandName === 'addsubscriber') {
     const user = interaction.options.getUser('user', true);
-    const added = await addSubscriber(user.id);
+    const added = await addSubscriber(user.id, user);
 
     if (added) {
       await incrementStats({ totalManualAdds: 1 });
@@ -3322,13 +3413,14 @@ function startCRMStatsServer() {
   router.get('/subscribers', asyncRoute(async (req, res) => {
     const [result, deliveryStats] = await Promise.all([
       listSubscribers({
-      page: req.query.page,
-      limit: req.query.limit || req.query.pageSize,
-      search: req.query.search,
-      includeUsers: req.query.includeUsers !== 'false',
+        page: req.query.page,
+        limit: req.query.limit || req.query.pageSize,
+        search: req.query.search,
+        includeUsers: req.query.includeUsers !== 'false',
       }),
       getSubscriberDeliveryStats(),
     ]);
+    scheduleSubscriberIdentityHydration(100);
     apiSuccess(res, { subscribers: result.subscribers, deliveryStats }, {
       page: result.page,
       pageSize: result.limit,
