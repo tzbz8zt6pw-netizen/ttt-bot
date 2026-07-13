@@ -1412,8 +1412,8 @@ async function getSubscriberDmStats(discordUserId) {
     `
     SELECT
       COUNT(*)::int AS total_attempts,
-      COUNT(*) FILTER (WHERE status = 'sent')::int AS total_successes,
-      COUNT(*) FILTER (WHERE status <> 'sent')::int AS total_failures,
+      COUNT(*) FILTER (WHERE LOWER(status) = 'sent')::int AS total_successes,
+      COUNT(*) FILTER (WHERE LOWER(status) <> 'sent')::int AS total_failures,
       MAX(created_at) AS last_dm_date,
       (ARRAY_AGG(status ORDER BY created_at DESC))[1] AS last_dm_result
     FROM discord_dm_deliveries
@@ -1423,6 +1423,43 @@ async function getSubscriberDmStats(discordUserId) {
   );
 
   return result.rows[0] || {};
+}
+
+async function getSubscriberDeliveryStats() {
+  const result = await pool.query(
+    `
+    SELECT
+      COUNT(*)::int AS total_attempts,
+      COUNT(*) FILTER (WHERE LOWER(status) = 'sent')::int AS total_successes,
+      COUNT(*) FILTER (WHERE LOWER(status) <> 'sent')::int AS total_failures,
+      MAX(created_at) AS last_delivery_at,
+      (ARRAY_AGG(status ORDER BY created_at DESC))[1] AS last_delivery_status
+    FROM discord_dm_deliveries
+    `
+  );
+  const campaigns = await pool.query(
+    `
+    SELECT
+      COUNT(*)::int AS total_campaigns,
+      COUNT(*) FILTER (WHERE LOWER(status) IN ('completed', 'partial'))::int AS completed_campaigns,
+      COUNT(*) FILTER (WHERE LOWER(status) IN ('queued', 'running'))::int AS running_campaigns,
+      COUNT(*) FILTER (WHERE LOWER(status) = 'failed')::int AS failed_campaigns
+    FROM discord_dm_campaigns
+    `
+  );
+  const delivery = result.rows[0] || {};
+  const campaign = campaigns.rows[0] || {};
+  return {
+    totalAttempts: Number(delivery.total_attempts || 0),
+    totalSuccesses: Number(delivery.total_successes || 0),
+    totalFailures: Number(delivery.total_failures || 0),
+    lastDeliveryAt: delivery.last_delivery_at || null,
+    lastDeliveryStatus: delivery.last_delivery_status || null,
+    totalCampaigns: Number(campaign.total_campaigns || 0),
+    completedCampaigns: Number(campaign.completed_campaigns || 0),
+    runningCampaigns: Number(campaign.running_campaigns || 0),
+    failedCampaigns: Number(campaign.failed_campaigns || 0),
+  };
 }
 
 async function serializeSubscriberRow(row, { includeUser = true } = {}) {
@@ -3283,17 +3320,20 @@ function startCRMStatsServer() {
   }));
 
   router.get('/subscribers', asyncRoute(async (req, res) => {
-    const result = await listSubscribers({
+    const [result, deliveryStats] = await Promise.all([
+      listSubscribers({
       page: req.query.page,
       limit: req.query.limit || req.query.pageSize,
       search: req.query.search,
       includeUsers: req.query.includeUsers !== 'false',
-    });
-    apiSuccess(res, result.subscribers, {
+      }),
+      getSubscriberDeliveryStats(),
+    ]);
+    apiSuccess(res, { subscribers: result.subscribers, deliveryStats }, {
       page: result.page,
       pageSize: result.limit,
       total: result.total,
-      extra: { subscribers: result.subscribers },
+      extra: { subscribers: result.subscribers, deliveryStats },
     });
   }));
 
@@ -3993,13 +4033,17 @@ function startCRMStatsServer() {
         internalName: req.body.internalName || managedPost.internal_name,
       })
       : (managedPost.payload || {});
+    const targetChannelId = payload.channelId || managedPost.channel_id;
+    const targetMessageId = targetChannelId === managedPost.channel_id
+      ? managedPost.message_id
+      : null;
     const description = managedDescriptionFromPayload(payload);
     const buttons = managedButtonsFromPayload(payload);
 
     try {
       const message = await editOrCreateManagedMessage({
-        channelId: managedPost.channel_id,
-        messageId: managedPost.message_id,
+        channelId: targetChannelId,
+        messageId: targetMessageId,
         payload: {
           title: payload.title || managedPost.internal_name,
           description,
@@ -4015,6 +4059,8 @@ function startCRMStatsServer() {
         },
         reactions: payload.reactions || DEFAULT_MANAGED_REACTIONS,
       });
+      payload.channelId = targetChannelId;
+      payload.messageId = message.id;
 
       const updateResult = await pool.query(
         `
@@ -4035,7 +4081,7 @@ function startCRMStatsServer() {
           req.params.id,
           message.id,
           JSON.stringify(payload),
-          payload.channelId || managedPost.channel_id,
+          targetChannelId,
           payload.internalName || managedPost.internal_name,
           payload.displayOrder || managedPost.display_order || 0,
         ]
