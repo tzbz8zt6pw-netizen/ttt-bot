@@ -126,6 +126,24 @@ const DEFAULT_WELCOME_SETTINGS = {
   reactions: [],
 };
 
+const DEFAULT_SUBSCRIBER_DM_DESCRIPTION =
+  `You’re now getting access to everything most traders miss.\n\n` +
+  `Here’s what separates TTT from most prop firms:\n\n` +
+  `• Up to 90% profit split\n` +
+  `• Low 5% profit targets (built for consistency)\n` +
+  `• Clear, rule-based structure — no hidden tricks\n` +
+  `• Fast payouts & scalable funding up to $1M\n\n` +
+  `We’ve built TTT for traders who want structure, not luck.\n\n` +
+  `👉 Get started:\n${WEBSITE_URL}\n\n` +
+  `—\n\n` +
+  `Need help or have questions?\n\n` +
+  `💬 WhatsApp (fastest):\nhttps://wa.me/message/CCZYYQBWUHWSB1\n\n` +
+  `📩 Support:\nsupport@tttmarkets.com\n\n` +
+  `💳 Billing:\nBilling@tttmarkets.com\n\n` +
+  `🤝 Partnerships:\nPartnerships@tttmarkets.com\n\n` +
+  `Or open a ticket inside Discord.\n\n` +
+  `We’ll point you in the right direction.`;
+
 const DEFAULT_YOUTUBE_SETTINGS = {
   enabled: true,
   youtubeChannelId: process.env.YOUTUBE_CHANNEL_ID || null,
@@ -1432,7 +1450,7 @@ function buildYoutubeEmbed(video) {
     .setTimestamp();
 }
 
-function buildWelcomeEmbed(member, settings = DEFAULT_WELCOME_SETTINGS) {
+function buildWelcomeEmbed(member, settings = DEFAULT_WELCOME_SETTINGS, descriptionOverride = null) {
   const values = {
     member: `${member}`,
     username: member.user?.username || member.displayName || 'there',
@@ -1442,7 +1460,7 @@ function buildWelcomeEmbed(member, settings = DEFAULT_WELCOME_SETTINGS) {
   const embed = new EmbedBuilder()
     .setColor(BRAND_COLOR)
     .setTitle(renderTemplate(settings.embedTitle || `Welcome to ${BRAND_NAME}`, values))
-    .setDescription(renderTemplate(settings.description || DEFAULT_WELCOME_SETTINGS.description, values))
+    .setDescription(renderTemplate(descriptionOverride || settings.description || DEFAULT_WELCOME_SETTINGS.description, values))
     .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
     .setTimestamp();
 
@@ -2057,7 +2075,8 @@ async function sendWelcomeFlow(member) {
     await sleep(Math.min(Number(settings.delayMs) || 0, 30000));
   }
 
-  const embed = buildWelcomeEmbed(member, settings);
+  const channelEmbed = buildWelcomeEmbed(member, settings, settings.description || DEFAULT_WELCOME_SETTINGS.description);
+  const dmEmbed = buildWelcomeEmbed(member, settings, settings.dmTemplate || settings.description || DEFAULT_WELCOME_SETTINGS.description);
   const extraButtonRows = buildButtonRows(settings.buttons || []).slice(0, 4);
   const components = [buildSubscriptionButtons(), ...(extraButtonRows.length ? extraButtonRows : [buildWebsiteButtonRow()])];
 
@@ -2074,7 +2093,7 @@ async function sendWelcomeFlow(member) {
             username: member.user?.username || member.displayName || 'there',
             brandName: BRAND_NAME,
           }),
-          embeds: [embed],
+          embeds: [channelEmbed],
           components,
           allowedMentions: { users: [member.id], parse: [] },
         });
@@ -2095,7 +2114,7 @@ async function sendWelcomeFlow(member) {
   if (settings.sendDm) {
     try {
       await member.send({
-        embeds: [embed],
+        embeds: [dmEmbed],
         components,
       });
       await incrementStats({ totalWelcomeDMs: 1 });
@@ -2718,30 +2737,16 @@ client.on('interactionCreate', async interaction => {
       if (added) {
         try {
           const user = await client.users.fetch(userId);
+          const settings = await getSetting('welcome', DEFAULT_WELCOME_SETTINGS);
+          const dmMember = {
+            id: userId,
+            user: { username: user.username },
+            displayName: user.globalName || user.username || 'there',
+            toString: () => `<@${userId}>`,
+          };
+          const dmDescription = settings.dmTemplate || DEFAULT_SUBSCRIBER_DM_DESCRIPTION;
 
-          const embed = new EmbedBuilder()
-            .setColor(BRAND_COLOR)
-            .setTitle('🚀 Welcome to TTT Markets')
-            .setDescription(
-              `You’re now getting access to everything most traders miss.\n\n` +
-                `Here’s what separates TTT from most prop firms:\n\n` +
-                `• Up to 90% profit split\n` +
-                `• Low 5% profit targets (built for consistency)\n` +
-                `• Clear, rule-based structure — no hidden tricks\n` +
-                `• Fast payouts & scalable funding up to $1M\n\n` +
-                `We’ve built TTT for traders who want structure, not luck.\n\n` +
-                `👉 Get started:\n${WEBSITE_URL}\n\n` +
-                `—\n\n` +
-                `Need help or have questions?\n\n` +
-                `💬 WhatsApp (fastest):\nhttps://wa.me/message/CCZYYQBWUHWSB1\n\n` +
-                `📩 Support:\nsupport@tttmarkets.com\n\n` +
-                `💳 Billing:\nBilling@tttmarkets.com\n\n` +
-                `🤝 Partnerships:\nPartnerships@tttmarkets.com\n\n` +
-                `Or open a ticket inside Discord.\n\n` +
-                `We’ll point you in the right direction.`
-            )
-            .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
-            .setTimestamp();
+          const embed = buildWelcomeEmbed(dmMember, settings, dmDescription);
 
           const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
@@ -2753,10 +2758,11 @@ client.on('interactionCreate', async interaction => {
               .setStyle(ButtonStyle.Link)
               .setURL('https://wa.me/message/CCZYYQBWUHWSB1')
           );
+          const configuredRows = buildButtonRows(settings.buttons || []).slice(0, 5);
 
           await user.send({
             embeds: [embed],
-            components: [row],
+            components: configuredRows.length ? configuredRows : [row],
           });
         } catch (error) {
           console.log(`Failed to send subscriber welcome DM to ${userId}: ${error.message}`);
@@ -3300,7 +3306,7 @@ function startCRMStatsServer() {
       displayName: 'Test User',
       toString: () => memberId ? `<@${memberId}>` : '@Test User',
     };
-    const embed = buildWelcomeEmbed(fakeMember, settings);
+    const embed = buildWelcomeEmbed(fakeMember, settings, settings.description || DEFAULT_WELCOME_SETTINGS.description);
     let message = null;
 
     if (channelId) {
