@@ -735,6 +735,42 @@ function sanitizeButtons(buttons) {
     .slice(0, 25);
 }
 
+function sanitizeManagedBlocks(blocks) {
+  if (!Array.isArray(blocks)) return [];
+
+  return blocks
+    .map((block, index) => {
+      const type = String(block?.type || 'text').trim().toLowerCase();
+      return {
+        id: String(block?.id || `block-${index + 1}`),
+        type: ['heading', 'note', 'button_group'].includes(type) ? type : 'text',
+        content: String(block?.content || '').trim(),
+        buttons: sanitizeButtons(block?.buttons || []),
+      };
+    })
+    .filter(block => block.content || block.buttons.length)
+    .slice(0, 20);
+}
+
+function managedDescriptionFromPayload(payload) {
+  const lines = [];
+  if (payload.description) lines.push(String(payload.description).trim());
+
+  for (const block of sanitizeManagedBlocks(payload.contentBlocks)) {
+    if (!block.content || block.type === 'button_group') continue;
+    if (block.type === 'heading') lines.push(`**${block.content}**`);
+    else if (block.type === 'note') lines.push(`> ${block.content.replace(/\n/g, '\n> ')}`);
+    else lines.push(block.content);
+  }
+
+  return lines.filter(Boolean).join('\n\n').slice(0, 4096);
+}
+
+function managedButtonsFromPayload(payload) {
+  const blockButtons = sanitizeManagedBlocks(payload.contentBlocks).flatMap(block => block.buttons || []);
+  return sanitizeButtons([...(payload.buttons || []), ...blockButtons]).slice(0, 25);
+}
+
 function buildButtonRows(buttons) {
   const safeButtons = sanitizeButtons(buttons);
   const rows = [];
@@ -2501,13 +2537,14 @@ async function createAnnouncement(body, req) {
 
 function normalizeManagedPayload(body) {
   const channelId = requireDiscordId(body.channelId || body.discordChannelId, 'Discord channel ID');
+  const contentBlocks = sanitizeManagedBlocks(body.contentBlocks || body.blocks || body.payload?.contentBlocks || []);
   const payload = {
     internalName: String(body.internalName || body.name || '').trim(),
     channelId,
     messageId: body.messageId || body.discordMessageId || null,
     status: body.status || 'draft',
     displayOrder: Number.parseInt(body.displayOrder || 0, 10) || 0,
-    templateId: body.templateId || null,
+    templateId: null,
     title: body.title || body.payload?.title || body.internalName || 'TTT Markets',
     description: body.description || body.payload?.description || '',
     content: body.content || body.payload?.content || '',
@@ -2517,7 +2554,7 @@ function normalizeManagedPayload(body) {
     footer: body.footer || body.payload?.footer || BRAND_FOOTER,
     embedColor: body.embedColor || body.color || body.payload?.embedColor || BRAND_COLOR,
     buttons: sanitizeButtons(body.buttons || body.payload?.buttons || []),
-    contentBlocks: body.contentBlocks || body.blocks || body.payload?.contentBlocks || [],
+    contentBlocks,
     reactions: sanitizeReactions(body.reactions || body.payload?.reactions, DEFAULT_MANAGED_REACTIONS).slice(0, 10),
   };
 
@@ -2536,6 +2573,40 @@ function normalizeManagedPayload(body) {
   });
 
   return payload;
+}
+
+function serializeManagedPost(row) {
+  if (!row) return null;
+  const payload = row.payload || {};
+  return {
+    id: row.id,
+    internalName: row.internal_name || payload.internalName || '',
+    name: row.internal_name || payload.internalName || '',
+    channelId: row.channel_id || payload.channelId || '',
+    discordMessageId: row.message_id || payload.messageId || null,
+    messageId: row.message_id || payload.messageId || null,
+    status: row.status || payload.status || 'draft',
+    displayOrder: row.display_order ?? payload.displayOrder ?? 0,
+    title: payload.title || row.internal_name || '',
+    description: payload.description || '',
+    content: payload.content || '',
+    contentBlocks: sanitizeManagedBlocks(payload.contentBlocks || []),
+    fields: Array.isArray(payload.fields) ? payload.fields : [],
+    imageUrl: payload.imageUrl || payload.image || null,
+    image: payload.imageUrl || payload.image || null,
+    thumbnail: payload.thumbnail || null,
+    footer: payload.footer || BRAND_FOOTER,
+    embedColour: payload.embedColour || payload.embedColor || BRAND_COLOR,
+    embedColor: payload.embedColor || payload.embedColour || BRAND_COLOR,
+    buttons: sanitizeButtons(payload.buttons || []),
+    reactions: sanitizeReactions(payload.reactions, DEFAULT_MANAGED_REACTIONS).slice(0, 10),
+    lastError: row.last_error || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastPublishedAt: row.published_at || null,
+    publishedAt: row.published_at || null,
+    payload,
+  };
 }
 
 async function getAutoReactionRule(id) {
@@ -3778,7 +3849,8 @@ function startCRMStatsServer() {
     const result = await pool.query(
       `SELECT * FROM discord_managed_posts ORDER BY display_order ASC, updated_at DESC`
     );
-    apiSuccess(res, result.rows, { total: result.rows.length, extra: { managedPosts: result.rows } });
+    const rows = result.rows.map(serializeManagedPost);
+    apiSuccess(res, rows, { total: rows.length, extra: { managedPosts: rows } });
   }));
 
   router.post('/managed-posts', asyncRoute(async (req, res) => {
@@ -3801,13 +3873,15 @@ function startCRMStatsServer() {
       ]
     );
     await logActivity({ type: 'managed_post', action: 'created', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(result.rows[0].id) });
-    apiSuccess(res, result.rows[0], { status: 201, extra: { managedPost: result.rows[0] } });
+    const managedPost = serializeManagedPost(result.rows[0]);
+    apiSuccess(res, managedPost, { status: 201, extra: { managedPost } });
   }));
 
   router.get('/managed-posts/:id', asyncRoute(async (req, res) => {
     const result = await pool.query(`SELECT * FROM discord_managed_posts WHERE id = $1`, [req.params.id]);
     if (!result.rowCount) throw createApiError('MANAGED_POST_NOT_FOUND', 'Managed post not found', 404);
-    apiSuccess(res, result.rows[0], { extra: { managedPost: result.rows[0] } });
+    const managedPost = serializeManagedPost(result.rows[0]);
+    apiSuccess(res, managedPost, { extra: { managedPost } });
   }));
 
   router.patch('/managed-posts/:id', asyncRoute(async (req, res) => {
@@ -3846,14 +3920,26 @@ function startCRMStatsServer() {
       ]
     );
     await logActivity({ type: 'managed_post', action: 'updated', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(req.params.id) });
-    apiSuccess(res, result.rows[0], { extra: { managedPost: result.rows[0] } });
+    const managedPost = serializeManagedPost(result.rows[0]);
+    apiSuccess(res, managedPost, { extra: { managedPost } });
   }));
 
   router.post('/managed-posts/:id/publish', asyncRoute(async (req, res) => {
     const result = await pool.query(`SELECT * FROM discord_managed_posts WHERE id = $1`, [req.params.id]);
     if (!result.rowCount) throw createApiError('MANAGED_POST_NOT_FOUND', 'Managed post not found', 404);
     const managedPost = result.rows[0];
-    const payload = managedPost.payload || {};
+    const hasIncomingDraft = req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0;
+    const payload = hasIncomingDraft
+      ? normalizeManagedPayload({
+        ...(managedPost.payload || {}),
+        ...req.body,
+        channelId: req.body.channelId || managedPost.channel_id,
+        messageId: managedPost.message_id,
+        internalName: req.body.internalName || managedPost.internal_name,
+      })
+      : (managedPost.payload || {});
+    const description = managedDescriptionFromPayload(payload);
+    const buttons = managedButtonsFromPayload(payload);
 
     try {
       const message = await editOrCreateManagedMessage({
@@ -3861,14 +3947,15 @@ function startCRMStatsServer() {
         messageId: managedPost.message_id,
         payload: {
           title: payload.title || managedPost.internal_name,
-          description: payload.description || '',
+          description,
           content: payload.content || '',
           fields: payload.fields || [],
           imageUrl: payload.imageUrl || null,
           thumbnail: payload.thumbnail || null,
           footer: payload.footer || BRAND_FOOTER,
           embedColor: payload.embedColor || BRAND_COLOR,
-          buttons: payload.buttons || [],
+          buttons,
+          components: buildButtonRows(buttons),
           pingEveryone: false,
         },
         reactions: payload.reactions || DEFAULT_MANAGED_REACTIONS,
@@ -3879,16 +3966,28 @@ function startCRMStatsServer() {
         UPDATE discord_managed_posts
         SET message_id = $2,
             status = 'published',
+            payload = $3::jsonb,
+            channel_id = $4,
+            internal_name = $5,
+            display_order = $6,
             last_error = NULL,
             updated_at = NOW(),
             published_at = NOW()
         WHERE id = $1
         RETURNING *
         `,
-        [req.params.id, message.id]
+        [
+          req.params.id,
+          message.id,
+          JSON.stringify(payload),
+          payload.channelId || managedPost.channel_id,
+          payload.internalName || managedPost.internal_name,
+          payload.displayOrder || managedPost.display_order || 0,
+        ]
       );
       await logActivity({ type: 'managed_post', action: 'published', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(req.params.id), metadata: { messageId: message.id } });
-      apiSuccess(res, updateResult.rows[0], { extra: { managedPost: updateResult.rows[0] } });
+      const updated = serializeManagedPost(updateResult.rows[0]);
+      apiSuccess(res, updated, { extra: { managedPost: updated } });
     } catch (error) {
       await pool.query(
         `UPDATE discord_managed_posts SET status = 'error', last_error = $2, updated_at = NOW() WHERE id = $1`,
