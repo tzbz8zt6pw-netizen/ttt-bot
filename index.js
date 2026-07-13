@@ -34,6 +34,7 @@ const pool = new Pool({
 const parser = new Parser();
 let youtubeIntervalHandle = null;
 let lastHeartbeatAt = null;
+let youtubeCheckRunning = false;
 
 const BRAND_COLOR = 0xf35023;
 const BRAND_NAME = 'TTT Markets';
@@ -1226,7 +1227,7 @@ function groupChannelsByCategory(channels) {
   return Array.from(groups.values());
 }
 
-async function listSubscribers({ page = 1, limit = 50, search = '' }) {
+async function listSubscribers({ page = 1, limit = 50, search = '', includeUsers = true }) {
   const safePage = parsePositiveInt(page, 1);
   const safeLimit = parsePositiveInt(limit, 50, 200);
   const offset = (safePage - 1) * safeLimit;
@@ -1259,7 +1260,7 @@ async function listSubscribers({ page = 1, limit = 50, search = '' }) {
 
   const subscribers = [];
   for (const row of rowsResult.rows) {
-    subscribers.push(await serializeSubscriberRow(row));
+    subscribers.push(await serializeSubscriberRow(row, { includeUser: includeUsers }));
   }
 
   return {
@@ -1299,9 +1300,9 @@ async function getSubscriberDmStats(discordUserId) {
   return result.rows[0] || {};
 }
 
-async function serializeSubscriberRow(row) {
+async function serializeSubscriberRow(row, { includeUser = true } = {}) {
   let user = null;
-  if (client.isReady()) {
+  if (includeUser && client.isReady()) {
     user = await client.users.fetch(row.user_id).catch(() => null);
   }
   const dmStats = await getSubscriberDmStats(row.user_id);
@@ -1685,6 +1686,11 @@ async function postYoutubeVideo(video) {
 }
 
 async function checkYoutubeFeed() {
+  if (youtubeCheckRunning) {
+    console.log('YouTube check skipped: previous check still running.');
+    return;
+  }
+  youtubeCheckRunning = true;
   try {
     const settings = await getSetting('youtube', DEFAULT_YOUTUBE_SETTINGS);
     if (!settings.enabled) return;
@@ -1708,50 +1714,34 @@ async function checkYoutubeFeed() {
       return;
     }
 
-    const newVideos = [];
+    const newestVideoId = recentItems[0]?.id?.split(':').pop();
+    if (!newestVideoId || newestVideoId === lastVideoId) return;
 
+    const unseenItems = [];
     for (const item of recentItems) {
       const videoId = item.id?.split(':').pop();
-      if (!videoId) continue;
-
-      if (videoId === lastVideoId) {
-        break;
-      }
-
-      if (!settings.autoPostShorts && looksLikeShort(item)) {
-        continue;
-      }
-
-      newVideos.push({
-        id: videoId,
-        title: item.title,
-        link: item.link,
-      });
+      if (!videoId || videoId === lastVideoId) break;
+      unseenItems.push({ ...item, videoId });
     }
 
-    if (newVideos.length === 0) return;
+    await setAppState('lastVideoId', newestVideoId);
 
-    newVideos.reverse();
-
-    for (const video of newVideos) {
+    const video = unseenItems.find(item => settings.autoPostShorts || !looksLikeShort(item));
+    if (video) {
       await postYoutubeVideo({
-        id: video.id,
+        id: video.videoId,
         title: video.title,
         link: video.link,
-        thumbnail: getYoutubeThumbnail(video.id),
+        thumbnail: getYoutubeThumbnail(video.videoId),
       });
-
-      await sleep(1500);
+      console.log(`Posted newest YouTube video: ${video.videoId}. Skipped ${Math.max(0, unseenItems.length - 1)} older unseen item(s).`);
+    } else {
+      console.log(`No eligible YouTube video to post. Marked newest seen item: ${newestVideoId}.`);
     }
-
-    const newestVideoId = recentItems[0]?.id?.split(':').pop();
-    if (newestVideoId) {
-      await setAppState('lastVideoId', newestVideoId);
-    }
-
-    console.log(`Posted ${newVideos.length} new YouTube video(s).`);
   } catch (error) {
     console.error('YouTube check failed:', error.message);
+  } finally {
+    youtubeCheckRunning = false;
   }
 }
 
@@ -2555,7 +2545,7 @@ function normalizeAutoReactionPayload(body, existing = {}) {
   const name = String(body.name ?? existing.name ?? '').trim();
   if (!name) throw createApiError('AUTO_REACTION_NAME_REQUIRED', 'Rule name is required', 400);
 
-  const reactions = sanitizeReactions(body.reactions ?? existing.reactions ?? [], []).slice(0, 10);
+  const reactions = sanitizeReactions(body.reactions ?? existing.reactions ?? [], []).slice(0, 13);
   if (reactions.length < 1) {
     throw createApiError('AUTO_REACTION_REACTIONS_REQUIRED', 'At least one reaction is required', 400);
   }
@@ -3148,6 +3138,7 @@ function startCRMStatsServer() {
       page: req.query.page,
       limit: req.query.limit || req.query.pageSize,
       search: req.query.search,
+      includeUsers: req.query.includeUsers !== 'false',
     });
     apiSuccess(res, result.subscribers, {
       page: result.page,
