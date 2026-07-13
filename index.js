@@ -707,6 +707,19 @@ function validateUrl(value, label) {
   }
 }
 
+function normalizeButtonUrl(value, label = 'Button URL') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) {
+    return `mailto:${raw}`;
+  }
+  if (/^mailto:/i.test(raw)) {
+    const email = raw.replace(/^mailto:/i, '').split('?')[0];
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return raw;
+  }
+  return validateUrl(raw, label);
+}
+
 function validateEmbedPayload(payload) {
   validateTextLength(payload.title, 256, 'Title');
   validateTextLength(payload.message || payload.description, 4096, 'Message');
@@ -729,7 +742,7 @@ function sanitizeButtons(buttons) {
   return buttons
     .map(button => ({
       label: String(button?.label || '').trim(),
-      url: button?.url ? validateUrl(button.url, 'Button URL') : null,
+      url: button?.url ? normalizeButtonUrl(button.url, 'Button URL') : null,
     }))
     .filter(button => button.label && button.url)
     .slice(0, 25);
@@ -1077,6 +1090,46 @@ async function logActivity({
   } catch (error) {
     console.log(`Activity log failed: ${error.message}`);
   }
+}
+
+function parseActivityMetadata(metadata) {
+  if (!metadata) return {};
+  if (typeof metadata === 'object') return metadata;
+  try {
+    return JSON.parse(metadata);
+  } catch (_) {
+    return {};
+  }
+}
+
+function serializeActivityLog(row) {
+  const metadata = parseActivityMetadata(row.metadata);
+  const status = row.error_message ? 'failed' : metadata.status || 'ok';
+  const channelId = metadata.channelId || metadata.discordChannelId || metadata.channel_id || null;
+  const channelName = metadata.channelName || metadata.discordChannelName || metadata.channel_name || channelId || null;
+  const messageId = metadata.messageId || metadata.discordMessageId || metadata.message_id || null;
+  const fallbackMessage = [row.type, row.action].filter(Boolean).join('.');
+
+  return {
+    id: row.id,
+    type: row.type,
+    action: row.action,
+    status,
+    source: row.source,
+    discordUserId: row.discord_user_id || metadata.discordUserId || metadata.userId || null,
+    channelId,
+    channelName,
+    messageId,
+    adminActor: row.actor || metadata.adminActor || metadata.actor || null,
+    actor: row.actor || metadata.actor || null,
+    entityType: row.entity_type || null,
+    entityId: row.entity_id || null,
+    message: row.error_message || metadata.message || metadata.summary || metadata.title || metadata.description || messageId || fallbackMessage,
+    error: row.error_message || null,
+    metadata,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at || row.created_at,
+  };
 }
 
 async function getWelcomedCount() {
@@ -2132,8 +2185,6 @@ async function sendWelcomeFlow(member) {
     await sleep(Math.min(Number(settings.delayMs) || 0, 30000));
   }
 
-  const channelEmbed = buildWelcomeEmbed(member, settings, settings.description || DEFAULT_WELCOME_SETTINGS.description);
-  const dmEmbed = buildWelcomeEmbed(member, settings, settings.dmTemplate || settings.description || DEFAULT_WELCOME_SETTINGS.description);
   const extraButtonRows = buildButtonRows(settings.buttons || []).slice(0, 4);
   const components = [buildSubscriptionButtons(), ...(extraButtonRows.length ? extraButtonRows : [buildWebsiteButtonRow()])];
 
@@ -2150,7 +2201,6 @@ async function sendWelcomeFlow(member) {
             username: member.user?.username || member.displayName || 'there',
             brandName: BRAND_NAME,
           }),
-          embeds: [channelEmbed],
           components,
           allowedMentions: { users: [member.id], parse: [] },
         });
@@ -2166,31 +2216,6 @@ async function sendWelcomeFlow(member) {
     }
   } catch (error) {
     console.log(`Failed welcome channel post for ${member.id}: ${error.message}`);
-  }
-
-  if (settings.sendDm) {
-    try {
-      await member.send({
-        embeds: [dmEmbed],
-        components,
-      });
-      await incrementStats({ totalWelcomeDMs: 1 });
-      await logActivity({
-        type: 'welcome',
-        action: 'dm_sent',
-        source: 'bot',
-        discordUserId: member.id,
-      });
-    } catch (error) {
-      console.log(`Failed welcome DM for ${member.id}: ${error.message}`);
-      await logActivity({
-        type: 'welcome',
-        action: 'dm_failed',
-        source: 'bot',
-        discordUserId: member.id,
-        errorMessage: error.message,
-      });
-    }
   }
 
   if (settings.autoSubscribeNewMember) {
@@ -2210,6 +2235,15 @@ async function sendWelcomeFlow(member) {
 
 client.once('clientReady', async () => {
   console.log(`Bot is online as ${client.user.tag}`);
+  const desiredBotName = process.env.DISCORD_BOT_DISPLAY_NAME || 'TTT Markets';
+  if (client.user?.username && client.user.username !== desiredBotName) {
+    try {
+      await client.user.setUsername(desiredBotName);
+      console.log(`Bot display name set to ${desiredBotName}`);
+    } catch (error) {
+      console.log(`Unable to update bot display name to ${desiredBotName}: ${error.message}`);
+    }
+  }
 
   lastHeartbeatAt = new Date().toISOString();
   await checkYoutubeFeed();
@@ -2830,6 +2864,7 @@ client.on('interactionCreate', async interaction => {
         try {
           const user = await client.users.fetch(userId);
           const settings = await getSetting('welcome', DEFAULT_WELCOME_SETTINGS);
+          if (settings.sendDm === false) return;
           const dmMember = {
             id: userId,
             user: { username: user.username },
@@ -2856,8 +2891,24 @@ client.on('interactionCreate', async interaction => {
             embeds: [embed],
             components: configuredRows.length ? configuredRows : [row],
           });
+          await incrementStats({ totalWelcomeDMs: 1 });
+          await logActivity({
+            type: 'welcome',
+            action: 'dm_sent',
+            source: 'bot',
+            discordUserId: userId,
+            metadata: { trigger: 'subscribe_alerts' },
+          });
         } catch (error) {
           console.log(`Failed to send subscriber welcome DM to ${userId}: ${error.message}`);
+          await logActivity({
+            type: 'welcome',
+            action: 'dm_failed',
+            source: 'bot',
+            discordUserId: userId,
+            metadata: { trigger: 'subscribe_alerts' },
+            errorMessage: error.message,
+          });
         }
       }
 
@@ -4029,7 +4080,8 @@ function startCRMStatsServer() {
       `,
       [parsePositiveInt(req.query.limit, 100, 500)]
     );
-    apiSuccess(res, result.rows, { total: result.rows.length, extra: { activity: result.rows } });
+    const rows = result.rows.map(serializeActivityLog);
+    apiSuccess(res, rows, { total: rows.length, extra: { activity: rows } });
   }));
 
   router.get('/dm-campaigns', asyncRoute(async (req, res) => {
