@@ -224,6 +224,10 @@ async function initDB() {
     );
   `);
 
+  await pool.query(`ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'subscribed';`);
+  await pool.query(`ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS unsubscribed_at TIMESTAMPTZ;`);
+  await pool.query(`UPDATE subscribers SET status = 'subscribed' WHERE status IS NULL OR status = '';`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS welcomed_users (
       user_id TEXT PRIMARY KEY,
@@ -516,9 +520,12 @@ async function initDB() {
 async function addSubscriber(userId) {
   const result = await pool.query(
     `
-    INSERT INTO subscribers (user_id)
-    VALUES ($1)
-    ON CONFLICT (user_id) DO NOTHING
+    INSERT INTO subscribers (user_id, status, unsubscribed_at)
+    VALUES ($1, 'subscribed', NULL)
+    ON CONFLICT (user_id)
+    DO UPDATE SET status = 'subscribed', unsubscribed_at = NULL
+    WHERE subscribers.status IS DISTINCT FROM 'subscribed'
+       OR subscribers.unsubscribed_at IS NOT NULL
     RETURNING user_id
     `,
     [userId]
@@ -529,7 +536,14 @@ async function addSubscriber(userId) {
 
 async function removeSubscriber(userId) {
   const result = await pool.query(
-    `DELETE FROM subscribers WHERE user_id = $1`,
+    `
+    UPDATE subscribers
+    SET status = 'unsubscribed',
+        unsubscribed_at = NOW()
+    WHERE user_id = $1
+      AND status IS DISTINCT FROM 'unsubscribed'
+    RETURNING user_id
+    `,
     [userId]
   );
   return result.rowCount > 0;
@@ -537,14 +551,14 @@ async function removeSubscriber(userId) {
 
 async function getSubscriberCount() {
   const result = await pool.query(
-    `SELECT COUNT(*)::int AS count FROM subscribers`
+    `SELECT COUNT(*)::int AS count FROM subscribers WHERE status = 'subscribed'`
   );
   return result.rows[0].count;
 }
 
 async function getSubscriberIds() {
   const result = await pool.query(
-    `SELECT user_id FROM subscribers ORDER BY created_at ASC`
+    `SELECT user_id FROM subscribers WHERE status = 'subscribed' ORDER BY created_at ASC`
   );
   return result.rows.map(row => row.user_id);
 }
@@ -1247,21 +1261,21 @@ function groupChannelsByCategory(channels) {
 
 async function listSubscribers({ page = 1, limit = 50, search = '', includeUsers = true }) {
   const safePage = parsePositiveInt(page, 1);
-  const safeLimit = parsePositiveInt(limit, 50, 200);
+  const safeLimit = parsePositiveInt(limit, 50, 1000);
   const offset = (safePage - 1) * safeLimit;
   const like = `%${String(search || '').trim()}%`;
   const params = search ? [like, safeLimit, offset] : [safeLimit, offset];
 
   const rowsQuery = search
     ? `
-      SELECT user_id, created_at
+      SELECT user_id, created_at, status, unsubscribed_at
       FROM subscribers
       WHERE user_id ILIKE $1
       ORDER BY created_at DESC
       LIMIT $2 OFFSET $3
       `
     : `
-      SELECT user_id, created_at
+      SELECT user_id, created_at, status, unsubscribed_at
       FROM subscribers
       ORDER BY created_at DESC
       LIMIT $1 OFFSET $2
@@ -1291,7 +1305,7 @@ async function listSubscribers({ page = 1, limit = 50, search = '', includeUsers
 
 async function getSubscriber(discordUserId) {
   const result = await pool.query(
-    `SELECT user_id, created_at FROM subscribers WHERE user_id = $1`,
+    `SELECT user_id, created_at, status, unsubscribed_at FROM subscribers WHERE user_id = $1`,
     [discordUserId]
   );
 
@@ -1330,7 +1344,10 @@ async function serializeSubscriberRow(row, { includeUser = true } = {}) {
     username: user?.username || null,
     displayName: user?.globalName || user?.username || null,
     avatar: user?.displayAvatarURL?.() || null,
+    status: row.status || 'subscribed',
+    subscriptionStatus: row.status === 'unsubscribed' ? 'Unsubscribed' : 'Subscribed',
     dateSubscribed: row.created_at,
+    unsubscribedAt: row.unsubscribed_at || null,
     source: 'subscriber_table',
     lastDmDate: dmStats.last_dm_date || null,
     lastDmResult: dmStats.last_dm_result || null,
