@@ -347,6 +347,60 @@ let newsAlertIntervalHandle = null;
 let newsSyncRunning = false;
 let newsAlertPollRunning = false;
 
+const PAYOUT_FEED_MODES = new Set(['SIMULATION', 'LIVE', 'DISABLED']);
+const PAYOUT_FEED_STATUSES = new Set(['GENERATED', 'SCHEDULED', 'PROCESSING', 'POSTED', 'FAILED', 'SKIPPED', 'CANCELLED']);
+const PAYOUT_POSTING_DAYS = ['WEDNESDAY', 'THURSDAY'];
+const PAYOUT_FEED_POLL_MS = Number(process.env.DISCORD_PAYOUT_FEED_POLL_MS || 60 * 1000);
+const PAYOUT_STALE_GRACE_MINUTES = Number(process.env.DISCORD_PAYOUT_STALE_GRACE_MINUTES || 240);
+const DEFAULT_PAYOUT_COUNTRIES = ['GB', 'US', 'IT', 'DE', 'FR', 'ES', 'NL', 'BE', 'PL', 'NG', 'ZA', 'AE', 'IN', 'PK', 'BD', 'MY', 'TH', 'VN', 'JP', 'NZ', 'AU', 'CA', 'CH', 'IE', 'DK', 'SE', 'NO', 'FI', 'BR', 'MX', 'AR'];
+const PAYOUT_CURRENCIES = ['USD', 'GBP', 'EUR'];
+const DEFAULT_PAYOUT_SETTINGS = {
+  mode: 'DISABLED',
+  enabled: false,
+  destinationChannelId: process.env.DISCORD_PAYOUT_FEED_CHANNEL_ID || process.env.PAYOUT_PROOFS_CHANNEL_ID || null,
+  timezone: 'Europe/London',
+  postingDays: PAYOUT_POSTING_DAYS,
+  postingWindowStart: '10:00',
+  postingWindowEnd: '22:00',
+  weeklyMinimum: 20,
+  weeklyMaximum: 50,
+  minimumIntervalMinutes: 10,
+  maximumIntervalMinutes: 95,
+  randomiseTiming: true,
+  simulationEnabled: false,
+  simulationNameMode: 'FIRST_INITIAL',
+  simulationCurrencyMode: 'DEFAULT',
+  simulationMinAmount: 25,
+  simulationMaxAmount: 2500,
+  simulationDecimalVariation: true,
+  simulationSelectedCountries: DEFAULT_PAYOUT_COUNTRIES,
+  simulationTemplateRotation: true,
+  defaultCurrency: 'USD',
+};
+const PAYOUT_NAME_POOL = [
+  'Alex', 'Daniel', 'Sofia', 'James', 'Marco', 'Amina', 'Liam', 'Elena', 'Maya', 'Noah',
+  'Amelia', 'Omar', 'Hiro', 'Priya', 'Fatima', 'Lucas', 'Emma', 'Mateo', 'Zara', 'Leo',
+  'Nadia', 'Kai', 'Mila', 'Hassan', 'Chloe', 'Victor', 'Sara', 'Ethan', 'Aisha', 'Theo',
+  'Ines', 'Ravi', 'Luca', 'Grace', 'Yusuf', 'Hana', 'Ben', 'Lina', 'Arjun', 'Mia',
+];
+const PAYOUT_INITIALS = 'ABCDEFGHJKLMNPRSTVWYZ'.split('');
+const DEFAULT_PAYOUT_TEMPLATES = [
+  'A TTT Trader from {{flag}} {{display_name}} just secured a {{formatted_amount}} reward! 💰',
+  'A TTT Trader from {{flag}} just secured a {{formatted_amount}} reward! 💰',
+  '{{flag}} {{display_name}} just secured a {{formatted_amount}} reward! 💸',
+  'Another TTT Trader from {{flag}} has secured {{formatted_amount}}! 💰',
+  'Reward secured ✅ {{flag}} {{display_name}} received {{formatted_amount}}.',
+  'A trader from {{flag}} just locked in a {{formatted_amount}} reward! 💸',
+  'Another reward update — {{flag}} {{display_name}} secured {{formatted_amount}}! 💰',
+  '{{formatted_amount}} secured by a TTT Trader from {{flag}}! 🚀',
+  'A TTT Trader from {{flag}} has just received {{formatted_amount}}! 💰',
+  'Fresh reward update: {{flag}} {{display_name}} secured {{formatted_amount}}.',
+  'Another trader rewarded ✅ {{flag}} {{display_name}} received {{formatted_amount}}.',
+  '{{flag}} A TTT Trader just secured a {{formatted_amount}} reward! 💸',
+];
+let payoutFeedIntervalHandle = null;
+let payoutFeedPollRunning = false;
+
 const DEFAULT_CHANNEL_MAPPINGS = {
   general: process.env.GENERAL_CHANNEL_ID || null,
   announcements: process.env.ANNOUNCEMENTS_CHANNEL_ID || null,
@@ -769,6 +823,118 @@ async function initDB() {
     );
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_payout_feed_settings (
+      id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+      mode TEXT NOT NULL DEFAULT 'DISABLED',
+      enabled BOOLEAN NOT NULL DEFAULT false,
+      destination_channel_id TEXT,
+      timezone TEXT NOT NULL DEFAULT 'Europe/London',
+      posting_days JSONB NOT NULL DEFAULT '["WEDNESDAY","THURSDAY"]'::jsonb,
+      posting_window_start TEXT NOT NULL DEFAULT '10:00',
+      posting_window_end TEXT NOT NULL DEFAULT '22:00',
+      weekly_minimum INTEGER NOT NULL DEFAULT 20,
+      weekly_maximum INTEGER NOT NULL DEFAULT 50,
+      minimum_interval_minutes INTEGER NOT NULL DEFAULT 10,
+      maximum_interval_minutes INTEGER NOT NULL DEFAULT 95,
+      randomise_timing BOOLEAN NOT NULL DEFAULT true,
+      simulation_enabled BOOLEAN NOT NULL DEFAULT false,
+      simulation_name_mode TEXT NOT NULL DEFAULT 'FIRST_INITIAL',
+      simulation_currency_mode TEXT NOT NULL DEFAULT 'DEFAULT',
+      simulation_min_amount NUMERIC(12, 3) NOT NULL DEFAULT 25,
+      simulation_max_amount NUMERIC(12, 3) NOT NULL DEFAULT 2500,
+      simulation_decimal_variation BOOLEAN NOT NULL DEFAULT true,
+      simulation_selected_countries JSONB NOT NULL DEFAULT '["GB","US","IT","DE","FR","ES","NL","BE","PL","NG","ZA","AE","IN","PK","BD","MY","TH","VN","JP","NZ","AU","CA","CH","IE","DK","SE","NO","FI","BR","MX","AR"]'::jsonb,
+      simulation_template_rotation BOOLEAN NOT NULL DEFAULT true,
+      default_currency TEXT NOT NULL DEFAULT 'USD',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_by TEXT
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_payout_feed_templates (
+      id BIGSERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      weight INTEGER NOT NULL DEFAULT 1,
+      body_template TEXT NOT NULL,
+      source_type TEXT NOT NULL DEFAULT 'SIMULATION',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS discord_payout_feed_templates_name_source_key
+    ON discord_payout_feed_templates (name, source_type);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_payout_feed_weeks (
+      id BIGSERIAL PRIMARY KEY,
+      mode TEXT NOT NULL,
+      week_start TIMESTAMPTZ NOT NULL,
+      week_end TIMESTAMPTZ NOT NULL,
+      weekly_target INTEGER NOT NULL,
+      wednesday_target INTEGER NOT NULL DEFAULT 0,
+      thursday_target INTEGER NOT NULL DEFAULT 0,
+      generated_count INTEGER NOT NULL DEFAULT 0,
+      scheduled_count INTEGER NOT NULL DEFAULT 0,
+      posted_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      random_seed_hash TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS discord_payout_feed_weeks_mode_week_key
+    ON discord_payout_feed_weeks (mode, week_start);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_payout_feed_items (
+      id BIGSERIAL PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      is_simulated BOOLEAN NOT NULL DEFAULT false,
+      external_payout_id TEXT UNIQUE,
+      first_name TEXT,
+      last_name TEXT,
+      display_name TEXT,
+      country_code TEXT,
+      country_name TEXT,
+      flag TEXT,
+      amount NUMERIC(12, 3) NOT NULL DEFAULT 0,
+      currency TEXT NOT NULL DEFAULT 'USD',
+      status TEXT NOT NULL DEFAULT 'GENERATED',
+      scheduled_for TIMESTAMPTZ,
+      discord_message_id TEXT,
+      posted_at TIMESTAMPTZ,
+      template_id BIGINT REFERENCES discord_payout_feed_templates(id) ON DELETE SET NULL,
+      week_id BIGINT REFERENCES discord_payout_feed_weeks(id) ON DELETE SET NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`ALTER TABLE discord_payout_feed_items ADD COLUMN IF NOT EXISTS week_id BIGINT REFERENCES discord_payout_feed_weeks(id) ON DELETE SET NULL;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS discord_payout_feed_items_due_idx ON discord_payout_feed_items (status, scheduled_for);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS discord_payout_feed_items_week_idx ON discord_payout_feed_items (week_id, status);`);
+
+  await pool.query(
+    `
+    INSERT INTO discord_payout_feed_settings (id, destination_channel_id)
+    VALUES (1, $1)
+    ON CONFLICT (id) DO NOTHING
+    `,
+    [DEFAULT_PAYOUT_SETTINGS.destinationChannelId]
+  );
+
   await pool.query(
     `
     INSERT INTO discord_news_settings (id, destination_channel_id)
@@ -795,6 +961,7 @@ async function initDB() {
   await ensureSetting('channel_mappings', DEFAULT_CHANNEL_MAPPINGS, 'mappings');
   await ensureSetting('role_mappings', DEFAULT_ROLE_MAPPINGS, 'mappings');
   await seedNewsTemplates();
+  await seedPayoutFeedTemplates();
 
   for (const [key, channelId] of Object.entries(DEFAULT_CHANNEL_MAPPINGS)) {
     await pool.query(
@@ -2562,6 +2729,775 @@ async function getNewsOverview() {
   };
 }
 
+function payoutRandomInt(min, max, rng = Math.random) {
+  const floor = Math.ceil(Number(min));
+  const ceiling = Math.floor(Number(max));
+  return Math.floor(rng() * (ceiling - floor + 1)) + floor;
+}
+
+function payoutRandomChoice(values, rng = Math.random) {
+  const list = Array.isArray(values) ? values.filter(value => value !== null && value !== undefined) : [];
+  if (!list.length) return null;
+  return list[payoutRandomInt(0, list.length - 1, rng)];
+}
+
+function getTimeZoneOffsetMs(date, timezone = 'Europe/London') {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  const asUtc = Date.UTC(
+    Number(values.year),
+    Number(values.month) - 1,
+    Number(values.day),
+    Number(values.hour),
+    Number(values.minute),
+    Number(values.second)
+  );
+  return asUtc - date.getTime();
+}
+
+function zonedTimeToUtc(year, month, day, hour, minute, timezone = 'Europe/London') {
+  let utc = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  let offset = getTimeZoneOffsetMs(new Date(utc), timezone);
+  utc = Date.UTC(year, month - 1, day, hour, minute, 0, 0) - offset;
+  offset = getTimeZoneOffsetMs(new Date(utc), timezone);
+  return new Date(Date.UTC(year, month - 1, day, hour, minute, 0, 0) - offset);
+}
+
+function localDateParts(date, timezone = 'Europe/London') {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: timezone,
+    weekday: 'long',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    weekday: String(values.weekday || '').toUpperCase(),
+  };
+}
+
+function localWeekRange(date = new Date(), timezone = 'Europe/London') {
+  const parts = localDateParts(date, timezone);
+  const weekdayIndex = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'].indexOf(parts.weekday);
+  const daysSinceMonday = weekdayIndex === 0 ? 6 : Math.max(0, weekdayIndex - 1);
+  const mondayNoon = zonedTimeToUtc(parts.year, parts.month, parts.day, 12, 0, timezone);
+  mondayNoon.setUTCDate(mondayNoon.getUTCDate() - daysSinceMonday);
+  const mondayParts = localDateParts(mondayNoon, timezone);
+  const weekStart = zonedTimeToUtc(mondayParts.year, mondayParts.month, mondayParts.day, 0, 0, timezone);
+  const weekEnd = new Date(weekStart.getTime());
+  weekEnd.setUTCDate(weekEnd.getUTCDate() + 7);
+  return { weekStart, weekEnd };
+}
+
+function flagFromCountryCode(countryCode) {
+  const code = String(countryCode || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) return '🌍';
+  return code.replace(/./g, char => String.fromCodePoint(127397 + char.charCodeAt(0)));
+}
+
+function payoutCountryName(countryCode) {
+  const code = String(countryCode || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) return 'Unknown';
+  try {
+    const displayNames = new Intl.DisplayNames(['en'], { type: 'region' });
+    return displayNames.of(code) || code;
+  } catch (_) {
+    return code;
+  }
+}
+
+function formatPayoutAmount(amount, currency = 'USD') {
+  const value = Number(amount || 0);
+  const safeCurrency = /^[A-Z]{3}$/.test(String(currency || '').toUpperCase()) ? String(currency).toUpperCase() : 'USD';
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: safeCurrency,
+      minimumFractionDigits: value % 1 === 0 ? 0 : 2,
+      maximumFractionDigits: 2,
+    }).format(value);
+  } catch (_) {
+    return `${safeCurrency} ${value.toFixed(value % 1 === 0 ? 0 : 2)}`;
+  }
+}
+
+function renderPayoutTemplate(template, values = {}) {
+  return String(template || '').replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
+    return values[key] === undefined || values[key] === null ? '' : String(values[key]);
+  }).replace(/[ \t]+/g, ' ').trim();
+}
+
+function normalizePayoutSettings(settings = {}) {
+  const merged = { ...DEFAULT_PAYOUT_SETTINGS, ...settings };
+  const weeklyMinimum = Math.max(1, Math.min(Number(merged.weeklyMinimum || 20), 500));
+  const weeklyMaximum = Math.max(weeklyMinimum, Math.min(Number(merged.weeklyMaximum || 50), 500));
+  const minimumIntervalMinutes = Math.max(1, Math.min(Number(merged.minimumIntervalMinutes || 10), 720));
+  const maximumIntervalMinutes = Math.max(minimumIntervalMinutes, Math.min(Number(merged.maximumIntervalMinutes || 95), 720));
+  const selectedCountries = Array.isArray(merged.simulationSelectedCountries)
+    ? Array.from(new Set(merged.simulationSelectedCountries.map(value => String(value).trim().toUpperCase()).filter(value => /^[A-Z]{2}$/.test(value))))
+    : DEFAULT_PAYOUT_COUNTRIES;
+  const postingDays = Array.isArray(merged.postingDays)
+    ? merged.postingDays.map(value => String(value).trim().toUpperCase()).filter(value => PAYOUT_POSTING_DAYS.includes(value))
+    : PAYOUT_POSTING_DAYS;
+  return {
+    ...merged,
+    mode: PAYOUT_FEED_MODES.has(String(merged.mode || '').toUpperCase()) ? String(merged.mode).toUpperCase() : 'DISABLED',
+    enabled: Boolean(merged.enabled),
+    postingDays: postingDays.length ? postingDays : PAYOUT_POSTING_DAYS,
+    weeklyMinimum,
+    weeklyMaximum,
+    minimumIntervalMinutes,
+    maximumIntervalMinutes,
+    simulationMinAmount: Math.max(0, Number(merged.simulationMinAmount || 25)),
+    simulationMaxAmount: Math.max(Number(merged.simulationMinAmount || 25), Number(merged.simulationMaxAmount || 2500)),
+    simulationSelectedCountries: selectedCountries.length ? selectedCountries : DEFAULT_PAYOUT_COUNTRIES,
+    defaultCurrency: /^[A-Z]{3}$/.test(String(merged.defaultCurrency || '').toUpperCase()) ? String(merged.defaultCurrency).toUpperCase() : 'USD',
+  };
+}
+
+function parsePayoutTimeMinutes(value, fallback) {
+  const match = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return fallback;
+  const hours = Math.max(0, Math.min(Number(match[1]), 23));
+  const minutes = Math.max(0, Math.min(Number(match[2]), 59));
+  return hours * 60 + minutes;
+}
+
+function buildPayoutScheduleForDay({ dateParts, count, settings, rng = Math.random }) {
+  const normalized = normalizePayoutSettings(settings);
+  const start = parsePayoutTimeMinutes(normalized.postingWindowStart, 10 * 60);
+  const end = Math.max(start + 1, parsePayoutTimeMinutes(normalized.postingWindowEnd, 22 * 60));
+  const span = end - start;
+  const times = [];
+  let previous = null;
+
+  for (let index = 0; index < count; index += 1) {
+    const evenMinute = start + Math.floor(((index + 0.5) * span) / Math.max(1, count));
+    const jitterLimit = Math.min(normalized.maximumIntervalMinutes, Math.max(normalized.minimumIntervalMinutes, Math.floor(span / Math.max(2, count))));
+    const jitter = normalized.randomiseTiming ? payoutRandomInt(-jitterLimit, jitterLimit, rng) : 0;
+    let minuteOfDay = Math.max(start, Math.min(end, evenMinute + jitter));
+    if (previous !== null && minuteOfDay - previous < normalized.minimumIntervalMinutes) {
+      minuteOfDay = Math.min(end, previous + normalized.minimumIntervalMinutes);
+    }
+    previous = minuteOfDay;
+    times.push(zonedTimeToUtc(
+      dateParts.year,
+      dateParts.month,
+      dateParts.day,
+      Math.floor(minuteOfDay / 60),
+      minuteOfDay % 60,
+      normalized.timezone
+    ));
+  }
+
+  return times.sort((a, b) => a.getTime() - b.getTime());
+}
+
+function payoutDisplayName(firstName, rng = Math.random, mode = 'FIRST_INITIAL') {
+  const first = firstName || payoutRandomChoice(PAYOUT_NAME_POOL, rng) || 'Trader';
+  if (mode === 'ANONYMOUS') return 'TTT Trader';
+  if (mode === 'FIRST_NAME') return first;
+  return `${first} ${payoutRandomChoice(PAYOUT_INITIALS, rng) || 'T'}.`;
+}
+
+function generatePayoutWeekPlanPure(settings = {}, options = {}) {
+  const normalized = normalizePayoutSettings(settings);
+  const rng = options.rng || Math.random;
+  const now = options.now ? new Date(options.now) : new Date();
+  const { weekStart, weekEnd } = localWeekRange(now, normalized.timezone);
+  const weeklyTarget = Number(options.weeklyTarget || payoutRandomInt(normalized.weeklyMinimum, normalized.weeklyMaximum, rng));
+  const wednesdayTarget = Math.max(1, Math.min(weeklyTarget - 1, payoutRandomInt(Math.floor(weeklyTarget * 0.4), Math.ceil(weeklyTarget * 0.6), rng)));
+  const thursdayTarget = weeklyTarget - wednesdayTarget;
+  const baseLocal = localDateParts(weekStart, normalized.timezone);
+  const mondayNoon = zonedTimeToUtc(baseLocal.year, baseLocal.month, baseLocal.day, 12, 0, normalized.timezone);
+  const wednesday = new Date(mondayNoon.getTime());
+  wednesday.setUTCDate(wednesday.getUTCDate() + 2);
+  const thursday = new Date(mondayNoon.getTime());
+  thursday.setUTCDate(thursday.getUTCDate() + 3);
+  const templates = Array.isArray(options.templates) && options.templates.length ? options.templates : DEFAULT_PAYOUT_TEMPLATES.map((bodyTemplate, index) => ({ id: null, name: `Default ${index + 1}`, bodyTemplate }));
+  const schedule = [
+    ...buildPayoutScheduleForDay({ dateParts: localDateParts(wednesday, normalized.timezone), count: wednesdayTarget, settings: normalized, rng }),
+    ...buildPayoutScheduleForDay({ dateParts: localDateParts(thursday, normalized.timezone), count: thursdayTarget, settings: normalized, rng }),
+  ].sort((a, b) => a.getTime() - b.getTime());
+  let lastTemplateIndex = -1;
+
+  const items = schedule.map((scheduledFor, index) => {
+    const countryCode = payoutRandomChoice(normalized.simulationSelectedCountries, rng) || 'GB';
+    const currency = normalized.simulationCurrencyMode === 'RANDOM'
+      ? payoutRandomChoice(PAYOUT_CURRENCIES, rng)
+      : normalized.defaultCurrency;
+    const rawAmount = normalized.simulationMinAmount + rng() * (normalized.simulationMaxAmount - normalized.simulationMinAmount);
+    const amount = normalized.simulationDecimalVariation ? Number(rawAmount.toFixed(2)) : Math.round(rawAmount);
+    const firstName = payoutRandomChoice(PAYOUT_NAME_POOL, rng);
+    let templateIndex = payoutRandomInt(0, templates.length - 1, rng);
+    if (templates.length > 1 && normalized.simulationTemplateRotation && templateIndex === lastTemplateIndex) {
+      templateIndex = (templateIndex + 1) % templates.length;
+    }
+    lastTemplateIndex = templateIndex;
+    const template = templates[templateIndex];
+    const values = {
+      flag: flagFromCountryCode(countryCode),
+      country_code: countryCode,
+      country_name: payoutCountryName(countryCode),
+      first_name: firstName,
+      display_name: payoutDisplayName(firstName, rng, normalized.simulationNameMode),
+      amount,
+      currency,
+      formatted_amount: formatPayoutAmount(amount, currency),
+    };
+    return {
+      sourceType: 'SIMULATION',
+      isSimulated: true,
+      externalPayoutId: `sim_${localDateKey(weekStart, normalized.timezone).replace(/-/g, '')}_${String(index + 1).padStart(3, '0')}_${crypto.randomBytes(3).toString('hex')}`,
+      firstName,
+      lastName: null,
+      displayName: values.display_name,
+      countryCode,
+      countryName: values.country_name,
+      flag: values.flag,
+      amount,
+      currency,
+      scheduledFor,
+      templateId: template.id || null,
+      templateName: template.name || null,
+      message: renderPayoutTemplate(template.bodyTemplate || template.body_template || template, values),
+    };
+  });
+
+  return {
+    mode: normalized.mode,
+    weekStart,
+    weekEnd,
+    weeklyTarget,
+    wednesdayTarget,
+    thursdayTarget,
+    items,
+  };
+}
+
+function normalizePayoutSettingsRow(row) {
+  if (!row) return normalizePayoutSettings(DEFAULT_PAYOUT_SETTINGS);
+  return normalizePayoutSettings({
+    mode: row.mode,
+    enabled: row.enabled,
+    destinationChannelId: row.destination_channel_id || null,
+    timezone: row.timezone,
+    postingDays: row.posting_days,
+    postingWindowStart: row.posting_window_start,
+    postingWindowEnd: row.posting_window_end,
+    weeklyMinimum: row.weekly_minimum,
+    weeklyMaximum: row.weekly_maximum,
+    minimumIntervalMinutes: row.minimum_interval_minutes,
+    maximumIntervalMinutes: row.maximum_interval_minutes,
+    randomiseTiming: row.randomise_timing,
+    simulationEnabled: row.simulation_enabled,
+    simulationNameMode: row.simulation_name_mode,
+    simulationCurrencyMode: row.simulation_currency_mode,
+    simulationMinAmount: row.simulation_min_amount,
+    simulationMaxAmount: row.simulation_max_amount,
+    simulationDecimalVariation: row.simulation_decimal_variation,
+    simulationSelectedCountries: row.simulation_selected_countries,
+    simulationTemplateRotation: row.simulation_template_rotation,
+    defaultCurrency: row.default_currency,
+    updatedBy: row.updated_by || null,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+  });
+}
+
+async function getPayoutFeedSettings() {
+  const result = await pool.query(`SELECT * FROM discord_payout_feed_settings WHERE id = 1`);
+  if (!result.rowCount) {
+    await pool.query(
+      `INSERT INTO discord_payout_feed_settings (id, destination_channel_id) VALUES (1, $1) ON CONFLICT (id) DO NOTHING`,
+      [DEFAULT_PAYOUT_SETTINGS.destinationChannelId]
+    );
+    return normalizePayoutSettings(DEFAULT_PAYOUT_SETTINGS);
+  }
+  return normalizePayoutSettingsRow(result.rows[0]);
+}
+
+function sanitizePayoutSettingsPatch(body = {}) {
+  const patch = {};
+  if (Object.prototype.hasOwnProperty.call(body, 'mode')) {
+    const mode = String(body.mode || '').toUpperCase();
+    if (!PAYOUT_FEED_MODES.has(mode)) throw createApiError('PAYOUT_MODE_INVALID', 'Payout feed mode must be DISABLED, SIMULATION or LIVE', 400);
+    patch.mode = mode;
+  }
+  for (const key of ['enabled', 'randomiseTiming', 'simulationEnabled', 'simulationDecimalVariation', 'simulationTemplateRotation']) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = toBoolean(body[key], false);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'destinationChannelId') || Object.prototype.hasOwnProperty.call(body, 'destination_channel_id')) {
+    const channelId = body.destinationChannelId || body.destination_channel_id || null;
+    patch.destinationChannelId = channelId ? requireDiscordId(channelId, 'Payout destination channel ID') : null;
+  }
+  if (body.timezone) patch.timezone = String(body.timezone).trim().slice(0, 80) || 'Europe/London';
+  if (body.postingWindowStart && /^\d{1,2}:\d{2}$/.test(String(body.postingWindowStart))) patch.postingWindowStart = String(body.postingWindowStart);
+  if (body.postingWindowEnd && /^\d{1,2}:\d{2}$/.test(String(body.postingWindowEnd))) patch.postingWindowEnd = String(body.postingWindowEnd);
+  for (const key of ['weeklyMinimum', 'weeklyMaximum', 'minimumIntervalMinutes', 'maximumIntervalMinutes', 'simulationMinAmount', 'simulationMaxAmount']) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = Number(body[key]);
+  }
+  if (Array.isArray(body.postingDays)) patch.postingDays = body.postingDays.map(value => String(value).toUpperCase()).filter(value => PAYOUT_POSTING_DAYS.includes(value));
+  if (Array.isArray(body.simulationSelectedCountries)) patch.simulationSelectedCountries = body.simulationSelectedCountries.map(value => String(value).toUpperCase()).filter(value => /^[A-Z]{2}$/.test(value));
+  if (body.simulationNameMode) patch.simulationNameMode = String(body.simulationNameMode).trim().toUpperCase();
+  if (body.simulationCurrencyMode) patch.simulationCurrencyMode = String(body.simulationCurrencyMode).trim().toUpperCase();
+  if (body.defaultCurrency) patch.defaultCurrency = String(body.defaultCurrency).trim().toUpperCase();
+  return patch;
+}
+
+async function updatePayoutFeedSettings(patch, actor = null) {
+  const current = await getPayoutFeedSettings();
+  const next = normalizePayoutSettings({ ...current, ...patch });
+  await pool.query(
+    `
+    UPDATE discord_payout_feed_settings
+    SET mode = $1,
+        enabled = $2,
+        destination_channel_id = $3,
+        timezone = $4,
+        posting_days = $5::jsonb,
+        posting_window_start = $6,
+        posting_window_end = $7,
+        weekly_minimum = $8,
+        weekly_maximum = $9,
+        minimum_interval_minutes = $10,
+        maximum_interval_minutes = $11,
+        randomise_timing = $12,
+        simulation_enabled = $13,
+        simulation_name_mode = $14,
+        simulation_currency_mode = $15,
+        simulation_min_amount = $16,
+        simulation_max_amount = $17,
+        simulation_decimal_variation = $18,
+        simulation_selected_countries = $19::jsonb,
+        simulation_template_rotation = $20,
+        default_currency = $21,
+        updated_by = $22,
+        updated_at = NOW()
+    WHERE id = 1
+    RETURNING *
+    `,
+    [
+      next.mode,
+      next.enabled,
+      next.destinationChannelId,
+      next.timezone,
+      JSON.stringify(next.postingDays),
+      next.postingWindowStart,
+      next.postingWindowEnd,
+      next.weeklyMinimum,
+      next.weeklyMaximum,
+      next.minimumIntervalMinutes,
+      next.maximumIntervalMinutes,
+      next.randomiseTiming,
+      next.simulationEnabled,
+      next.simulationNameMode,
+      next.simulationCurrencyMode,
+      next.simulationMinAmount,
+      next.simulationMaxAmount,
+      next.simulationDecimalVariation,
+      JSON.stringify(next.simulationSelectedCountries),
+      next.simulationTemplateRotation,
+      next.defaultCurrency,
+      actor,
+    ]
+  );
+  return getPayoutFeedSettings();
+}
+
+async function seedPayoutFeedTemplates() {
+  for (const [index, bodyTemplate] of DEFAULT_PAYOUT_TEMPLATES.entries()) {
+    await pool.query(
+      `
+      INSERT INTO discord_payout_feed_templates (name, enabled, weight, body_template, source_type)
+      VALUES ($1, true, 1, $2, 'SIMULATION')
+      ON CONFLICT (name, source_type) DO NOTHING
+      `,
+      [`Simulation ${index + 1}`, bodyTemplate]
+    );
+  }
+}
+
+function serializePayoutTemplate(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    enabled: Boolean(row.enabled),
+    weight: Number(row.weight || 1),
+    bodyTemplate: row.body_template,
+    sourceType: row.source_type,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function serializePayoutWeek(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    mode: row.mode,
+    weekStart: row.week_start,
+    weekEnd: row.week_end,
+    weeklyTarget: Number(row.weekly_target || 0),
+    wednesdayTarget: Number(row.wednesday_target || 0),
+    thursdayTarget: Number(row.thursday_target || 0),
+    generatedCount: Number(row.generated_count || 0),
+    scheduledCount: Number(row.scheduled_count || 0),
+    postedCount: Number(row.posted_count || 0),
+    failedCount: Number(row.failed_count || 0),
+    randomSeedHash: row.random_seed_hash,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function serializePayoutItem(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    sourceType: row.source_type,
+    isSimulated: Boolean(row.is_simulated),
+    externalPayoutId: row.external_payout_id,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    displayName: row.display_name,
+    countryCode: row.country_code,
+    countryName: row.country_name,
+    flag: row.flag,
+    amount: Number(row.amount || 0),
+    currency: row.currency,
+    formattedAmount: formatPayoutAmount(row.amount, row.currency),
+    status: row.status,
+    scheduledFor: row.scheduled_for,
+    discordMessageId: row.discord_message_id,
+    postedAt: row.posted_at,
+    templateId: row.template_id,
+    weekId: row.week_id,
+    attemptCount: Number(row.attempt_count || 0),
+    lastError: row.last_error,
+    message: row.body_template ? renderPayoutTemplate(row.body_template, {
+      flag: row.flag,
+      display_name: row.display_name,
+      formatted_amount: formatPayoutAmount(row.amount, row.currency),
+      country_code: row.country_code,
+      country_name: row.country_name,
+      amount: row.amount,
+      currency: row.currency,
+    }) : null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function enabledPayoutTemplates(sourceType = 'SIMULATION') {
+  const result = await pool.query(
+    `SELECT * FROM discord_payout_feed_templates WHERE enabled = true AND source_type = $1 ORDER BY id ASC`,
+    [sourceType]
+  );
+  return result.rows.map(row => ({
+    id: row.id,
+    name: row.name,
+    bodyTemplate: row.body_template,
+    weight: Number(row.weight || 1),
+  }));
+}
+
+async function ensurePayoutWeek({ force = false, actor = null } = {}) {
+  const settings = await getPayoutFeedSettings();
+  if (!settings.enabled || settings.mode !== 'SIMULATION' || !settings.simulationEnabled) {
+    return { skipped: true, reason: 'simulation_disabled', settings };
+  }
+  if (!settings.destinationChannelId) {
+    return { skipped: true, reason: 'destination_channel_missing', settings };
+  }
+  const { weekStart, weekEnd } = localWeekRange(new Date(), settings.timezone);
+  const existing = await pool.query(
+    `SELECT * FROM discord_payout_feed_weeks WHERE mode = 'SIMULATION' AND week_start = $1 LIMIT 1`,
+    [weekStart]
+  );
+  if (existing.rowCount && !force) return { week: serializePayoutWeek(existing.rows[0]), created: false, skipped: true, reason: 'already_generated' };
+  if (existing.rowCount && force) {
+    await pool.query(
+      `
+      UPDATE discord_payout_feed_items
+      SET status = 'CANCELLED', last_error = 'Cancelled by regeneration', updated_at = NOW()
+      WHERE week_id = $1 AND status IN ('GENERATED', 'SCHEDULED', 'FAILED', 'SKIPPED', 'CANCELLED')
+      `,
+      [existing.rows[0].id]
+    );
+  }
+  const templates = await enabledPayoutTemplates('SIMULATION');
+  const plan = generatePayoutWeekPlanPure(settings, { templates });
+  const weekResult = existing.rowCount
+    ? await pool.query(
+      `
+      UPDATE discord_payout_feed_weeks
+      SET weekly_target = $2,
+          wednesday_target = $3,
+          thursday_target = $4,
+          generated_count = 0,
+          scheduled_count = 0,
+          failed_count = 0,
+          random_seed_hash = $5,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [existing.rows[0].id, plan.weeklyTarget, plan.wednesdayTarget, plan.thursdayTarget, crypto.randomBytes(12).toString('hex')]
+    )
+    : await pool.query(
+      `
+      INSERT INTO discord_payout_feed_weeks
+        (mode, week_start, week_end, weekly_target, wednesday_target, thursday_target, random_seed_hash)
+      VALUES ('SIMULATION', $1, $2, $3, $4, $5, $6)
+      RETURNING *
+      `,
+      [weekStart, weekEnd, plan.weeklyTarget, plan.wednesdayTarget, plan.thursdayTarget, crypto.randomBytes(12).toString('hex')]
+    );
+  const week = weekResult.rows[0];
+  let inserted = 0;
+  for (const item of plan.items) {
+    await pool.query(
+      `
+      INSERT INTO discord_payout_feed_items
+        (source_type, is_simulated, external_payout_id, first_name, last_name, display_name, country_code, country_name, flag, amount, currency, status, scheduled_for, template_id, week_id)
+      VALUES ('SIMULATION', true, $1, $2, $3, $4, $5, $6, $7, $8, $9, 'SCHEDULED', $10, $11, $12)
+      ON CONFLICT (external_payout_id) DO NOTHING
+      `,
+      [
+        item.externalPayoutId,
+        item.firstName,
+        item.lastName,
+        item.displayName,
+        item.countryCode,
+        item.countryName,
+        item.flag,
+        item.amount,
+        item.currency,
+        item.scheduledFor,
+        item.templateId,
+        week.id,
+      ]
+    );
+    inserted += 1;
+  }
+  const counts = await pool.query(
+    `
+    SELECT
+      COUNT(*) FILTER (WHERE status IN ('GENERATED','SCHEDULED','PROCESSING','POSTED'))::int AS generated,
+      COUNT(*) FILTER (WHERE status = 'SCHEDULED')::int AS scheduled,
+      COUNT(*) FILTER (WHERE status = 'POSTED')::int AS posted,
+      COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed
+    FROM discord_payout_feed_items
+    WHERE week_id = $1
+    `,
+    [week.id]
+  );
+  const updatedWeek = await pool.query(
+    `
+    UPDATE discord_payout_feed_weeks
+    SET generated_count = $2, scheduled_count = $3, posted_count = $4, failed_count = $5, updated_at = NOW()
+    WHERE id = $1
+    RETURNING *
+    `,
+    [
+      week.id,
+      counts.rows[0]?.generated || 0,
+      counts.rows[0]?.scheduled || 0,
+      counts.rows[0]?.posted || 0,
+      counts.rows[0]?.failed || 0,
+    ]
+  );
+  await logActivity({
+    type: 'payout_feed',
+    action: force ? 'week_regenerated' : 'week_generated',
+    actor,
+    source: actor ? 'crm_api' : 'bot',
+    entityType: 'discord_payout_feed_week',
+    entityId: String(week.id),
+    metadata: { weeklyTarget: plan.weeklyTarget, inserted },
+  });
+  return { week: serializePayoutWeek(updatedWeek.rows[0]), created: true, inserted };
+}
+
+async function sendPayoutFeedItem(row, { test = false, channelId = null } = {}) {
+  const settings = await getPayoutFeedSettings();
+  const destinationChannelId = channelId || settings.destinationChannelId;
+  if (!destinationChannelId) throw createApiError('PAYOUT_CHANNEL_MISSING', 'Payout destination channel is not configured', 400);
+  const templateRow = row.body_template ? row : (await pool.query(`SELECT * FROM discord_payout_feed_templates WHERE id = $1`, [row.template_id])).rows[0];
+  const values = {
+    flag: row.flag || flagFromCountryCode(row.country_code),
+    display_name: row.display_name || 'TTT Trader',
+    formatted_amount: formatPayoutAmount(row.amount, row.currency),
+    amount: row.amount,
+    currency: row.currency,
+    country_code: row.country_code,
+    country_name: row.country_name,
+  };
+  const content = renderPayoutTemplate(templateRow?.body_template || DEFAULT_PAYOUT_TEMPLATES[0], values).slice(0, 1800);
+  const channel = await fetchTextChannel(destinationChannelId);
+  const permissions = channel.permissionsFor(client.user);
+  if (permissions && !permissions.has(PermissionFlagsBits.SendMessages)) {
+    throw createApiError('PAYOUT_CHANNEL_NO_SEND_PERMISSION', 'Bot cannot send messages in the payout feed channel', 403);
+  }
+  const message = await channel.send({ content, allowedMentions: { parse: [] } });
+  return { messageId: message.id, channelId: destinationChannelId, content, test };
+}
+
+async function refreshPayoutWeekCounts(weekId) {
+  if (!weekId) return;
+  const counts = await pool.query(
+    `
+    SELECT
+      COUNT(*) FILTER (WHERE status IN ('GENERATED','SCHEDULED','PROCESSING','POSTED'))::int AS generated,
+      COUNT(*) FILTER (WHERE status = 'SCHEDULED')::int AS scheduled,
+      COUNT(*) FILTER (WHERE status = 'POSTED')::int AS posted,
+      COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed
+    FROM discord_payout_feed_items
+    WHERE week_id = $1
+    `,
+    [weekId]
+  );
+  await pool.query(
+    `
+    UPDATE discord_payout_feed_weeks
+    SET generated_count = $2, scheduled_count = $3, posted_count = $4, failed_count = $5, updated_at = NOW()
+    WHERE id = $1
+    `,
+    [weekId, counts.rows[0]?.generated || 0, counts.rows[0]?.scheduled || 0, counts.rows[0]?.posted || 0, counts.rows[0]?.failed || 0]
+  );
+}
+
+async function pollDuePayoutFeedItems() {
+  if (payoutFeedPollRunning) return { skipped: true, reason: 'already_running' };
+  payoutFeedPollRunning = true;
+  try {
+    const settings = await getPayoutFeedSettings();
+    if (!settings.enabled || settings.mode !== 'SIMULATION' || !settings.simulationEnabled) return { skipped: true, reason: 'disabled' };
+    await ensurePayoutWeek();
+    await pool.query(
+      `
+      UPDATE discord_payout_feed_items
+      SET status = 'SKIPPED', last_error = 'Skipped stale scheduled payout', updated_at = NOW()
+      WHERE status = 'SCHEDULED'
+        AND source_type = 'SIMULATION'
+        AND is_simulated = true
+        AND scheduled_for < NOW() - ($1 || ' minutes')::interval
+      `,
+      [PAYOUT_STALE_GRACE_MINUTES]
+    );
+    let processed = 0;
+    while (processed < 5) {
+      const result = await pool.query(
+        `
+        UPDATE discord_payout_feed_items
+        SET status = 'PROCESSING', attempt_count = attempt_count + 1, updated_at = NOW()
+        WHERE id = (
+          SELECT id
+          FROM discord_payout_feed_items
+          WHERE status = 'SCHEDULED'
+            AND source_type = 'SIMULATION'
+            AND is_simulated = true
+            AND scheduled_for <= NOW()
+          ORDER BY scheduled_for ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        )
+        RETURNING *
+        `
+      );
+      if (!result.rowCount) break;
+      const item = result.rows[0];
+      try {
+        const sent = await sendPayoutFeedItem(item);
+        await pool.query(
+          `
+          UPDATE discord_payout_feed_items
+          SET status = 'POSTED', discord_message_id = $2, posted_at = NOW(), last_error = NULL, updated_at = NOW()
+          WHERE id = $1
+          `,
+          [item.id, sent.messageId]
+        );
+        await refreshPayoutWeekCounts(item.week_id);
+        await logActivity({ type: 'payout_feed', action: 'item_posted', source: 'bot', entityType: 'discord_payout_feed_item', entityId: String(item.id), metadata: sent });
+      } catch (error) {
+        const retry = Number(item.attempt_count || 0) < 3;
+        await pool.query(
+          `
+          UPDATE discord_payout_feed_items
+          SET status = $2,
+              scheduled_for = CASE WHEN $2 = 'SCHEDULED' THEN NOW() + INTERVAL '10 minutes' ELSE scheduled_for END,
+              last_error = $3,
+              updated_at = NOW()
+          WHERE id = $1
+          `,
+          [item.id, retry ? 'SCHEDULED' : 'FAILED', sanitizePublicErrorMessage(error)]
+        );
+        await refreshPayoutWeekCounts(item.week_id);
+        await logActivity({ type: 'payout_feed', action: retry ? 'item_retry_scheduled' : 'item_failed', source: 'bot', entityType: 'discord_payout_feed_item', entityId: String(item.id), errorMessage: sanitizePublicErrorMessage(error) });
+      }
+      processed += 1;
+    }
+    return { processed };
+  } finally {
+    payoutFeedPollRunning = false;
+  }
+}
+
+async function startPayoutFeedScheduler() {
+  if (payoutFeedIntervalHandle) clearInterval(payoutFeedIntervalHandle);
+  await ensurePayoutWeek().catch(error => console.log(`Payout feed week generation skipped: ${error.message}`));
+  payoutFeedIntervalHandle = setInterval(() => {
+    pollDuePayoutFeedItems().catch(error => console.log(`Payout feed poll failed: ${error.message}`));
+  }, Math.max(15_000, PAYOUT_FEED_POLL_MS));
+}
+
+async function getPayoutFeedOverview() {
+  const settings = await getPayoutFeedSettings();
+  const { weekStart } = localWeekRange(new Date(), settings.timezone);
+  const [currentWeek, totals, nextItem, recent] = await Promise.all([
+    pool.query(`SELECT * FROM discord_payout_feed_weeks WHERE mode = $1 AND week_start = $2 LIMIT 1`, [settings.mode === 'LIVE' ? 'LIVE' : 'SIMULATION', weekStart]),
+    pool.query(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE status = 'SCHEDULED')::int AS scheduled,
+        COUNT(*) FILTER (WHERE status = 'POSTED')::int AS posted,
+        COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed,
+        COUNT(*) FILTER (WHERE is_simulated = true)::int AS simulated_total,
+        COUNT(*) FILTER (WHERE is_simulated = false)::int AS live_total
+      FROM discord_payout_feed_items
+      `
+    ),
+    pool.query(`SELECT i.*, t.body_template FROM discord_payout_feed_items i LEFT JOIN discord_payout_feed_templates t ON t.id = i.template_id WHERE i.status = 'SCHEDULED' ORDER BY i.scheduled_for ASC LIMIT 1`),
+    pool.query(`SELECT i.*, t.body_template FROM discord_payout_feed_items i LEFT JOIN discord_payout_feed_templates t ON t.id = i.template_id ORDER BY i.created_at DESC LIMIT 10`),
+  ]);
+  return {
+    settings,
+    currentWeek: currentWeek.rows[0] ? serializePayoutWeek(currentWeek.rows[0]) : null,
+    scheduledCount: totals.rows[0]?.scheduled || 0,
+    postedCount: totals.rows[0]?.posted || 0,
+    failedCount: totals.rows[0]?.failed || 0,
+    simulatedTotal: totals.rows[0]?.simulated_total || 0,
+    liveTotal: totals.rows[0]?.live_total || 0,
+    nextScheduledItem: nextItem.rows[0] ? serializePayoutItem(nextItem.rows[0]) : null,
+    recentItems: recent.rows.map(serializePayoutItem),
+  };
+}
+
 async function getWelcomedCount() {
   const result = await pool.query(
     `SELECT COUNT(*)::int AS count FROM welcomed_users`
@@ -3756,6 +4692,10 @@ client.once('clientReady', async () => {
 
   await startNewsSchedulers().catch(error => {
     console.log(`News scheduler startup failed: ${error.message}`);
+  });
+
+  await startPayoutFeedScheduler().catch(error => {
+    console.log(`Payout feed scheduler startup failed: ${error.message}`);
   });
 });
 
@@ -5648,6 +6588,276 @@ function startCRMStatsServer() {
     apiSuccess(res, { deleted: result.rowCount > 0 }, { extra: { deleted: result.rowCount > 0 } });
   }));
 
+  router.get('/payout-feed/settings', asyncRoute(async (req, res) => {
+    const overview = await getPayoutFeedOverview();
+    apiSuccess(res, overview, { extra: { overview, settings: overview.settings } });
+  }));
+
+  router.patch('/payout-feed/settings', asyncRoute(async (req, res) => {
+    const patch = sanitizePayoutSettingsPatch(req.body || {});
+    const settings = await updatePayoutFeedSettings(patch, getActor(req));
+    await logActivity({ type: 'payout_feed', action: 'settings_changed', actor: getActor(req), source: 'crm_api', metadata: { keys: Object.keys(patch) } });
+    await startPayoutFeedScheduler();
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.post('/payout-feed/settings/switch-mode', asyncRoute(async (req, res) => {
+    const mode = String(req.body.mode || '').toUpperCase();
+    if (!PAYOUT_FEED_MODES.has(mode)) throw createApiError('PAYOUT_MODE_INVALID', 'Payout feed mode must be DISABLED, SIMULATION or LIVE', 400);
+    const settings = await updatePayoutFeedSettings({
+      mode,
+      enabled: mode !== 'DISABLED',
+      simulationEnabled: mode === 'SIMULATION',
+    }, getActor(req));
+    await logActivity({ type: 'payout_feed', action: 'mode_changed', actor: getActor(req), source: 'crm_api', metadata: { mode } });
+    await startPayoutFeedScheduler();
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.post('/payout-feed/settings/test-channel', asyncRoute(async (req, res) => {
+    const settings = await getPayoutFeedSettings();
+    const channelId = req.body.channelId || settings.destinationChannelId;
+    if (!channelId) throw createApiError('PAYOUT_CHANNEL_MISSING', 'Payout destination channel is not configured', 400);
+    const channel = await fetchTextChannel(requireDiscordId(channelId, 'Payout channel ID'));
+    const permissions = channel.permissionsFor(client.user);
+    const result = {
+      channelId: channel.id,
+      channelName: channel.name || null,
+      canView: permissions ? permissions.has(PermissionFlagsBits.ViewChannel) : true,
+      canSend: permissions ? permissions.has(PermissionFlagsBits.SendMessages) : true,
+      canMentionEveryone: permissions ? permissions.has(PermissionFlagsBits.MentionEveryone) : false,
+      allowedMentionsDisabled: true,
+    };
+    await logActivity({ type: 'payout_feed', action: 'channel_tested', actor: getActor(req), source: 'crm_api', metadata: result });
+    apiSuccess(res, result);
+  }));
+
+  router.post('/payout-feed/settings/send-test', asyncRoute(async (req, res) => {
+    const settings = await getPayoutFeedSettings();
+    const templates = await enabledPayoutTemplates('SIMULATION');
+    const plan = generatePayoutWeekPlanPure(settings, { templates, weeklyTarget: 2 });
+    const item = plan.items[0];
+    const sent = await sendPayoutFeedItem({
+      ...item,
+      amount: item.amount,
+      currency: item.currency,
+      country_code: item.countryCode,
+      country_name: item.countryName,
+      display_name: item.displayName,
+      flag: item.flag,
+      template_id: item.templateId,
+      body_template: templates.find(template => String(template.id) === String(item.templateId))?.bodyTemplate || DEFAULT_PAYOUT_TEMPLATES[0],
+    }, { test: true, channelId: req.body.channelId || settings.destinationChannelId });
+    await logActivity({ type: 'payout_feed', action: 'test_item_sent', actor: getActor(req), source: 'crm_api', metadata: sent });
+    apiSuccess(res, { sent: true, ...sent });
+  }));
+
+  router.get('/payout-feed/weeks/current', asyncRoute(async (req, res) => {
+    const settings = await getPayoutFeedSettings();
+    const { weekStart } = localWeekRange(new Date(), settings.timezone);
+    const result = await pool.query(`SELECT * FROM discord_payout_feed_weeks WHERE mode = $1 AND week_start = $2 LIMIT 1`, [settings.mode === 'LIVE' ? 'LIVE' : 'SIMULATION', weekStart]);
+    apiSuccess(res, result.rows[0] ? serializePayoutWeek(result.rows[0]) : null, { extra: { week: result.rows[0] ? serializePayoutWeek(result.rows[0]) : null } });
+  }));
+
+  router.get('/payout-feed/weeks', asyncRoute(async (req, res) => {
+    const page = parsePositiveInt(req.query.page, 1);
+    const limit = parsePositiveInt(req.query.limit || req.query.pageSize, 20, 100);
+    const offset = (page - 1) * limit;
+    const [result, count] = await Promise.all([
+      pool.query(`SELECT * FROM discord_payout_feed_weeks ORDER BY week_start DESC LIMIT $1 OFFSET $2`, [limit, offset]),
+      pool.query(`SELECT COUNT(*)::int AS count FROM discord_payout_feed_weeks`),
+    ]);
+    const weeks = result.rows.map(serializePayoutWeek);
+    apiSuccess(res, weeks, { page, pageSize: limit, total: count.rows[0]?.count || 0, extra: { weeks } });
+  }));
+
+  router.post('/payout-feed/weeks/generate-test', asyncRoute(async (req, res) => {
+    const settings = normalizePayoutSettings({ ...(await getPayoutFeedSettings()), ...(req.body || {}) });
+    const templates = await enabledPayoutTemplates('SIMULATION');
+    const plan = generatePayoutWeekPlanPure(settings, { templates, weeklyTarget: req.body.weeklyTarget || undefined });
+    apiSuccess(res, {
+      weekStart: plan.weekStart,
+      weekEnd: plan.weekEnd,
+      weeklyTarget: plan.weeklyTarget,
+      wednesdayTarget: plan.wednesdayTarget,
+      thursdayTarget: plan.thursdayTarget,
+      items: plan.items,
+    });
+  }));
+
+  router.post('/payout-feed/weeks/current/regenerate', asyncRoute(async (req, res) => {
+    const result = await ensurePayoutWeek({ force: true, actor: getActor(req) });
+    await startPayoutFeedScheduler();
+    apiSuccess(res, result, { extra: { result } });
+  }));
+
+  router.post('/payout-feed/weeks/current/pause', asyncRoute(async (req, res) => {
+    const settings = await updatePayoutFeedSettings({ enabled: false }, getActor(req));
+    await logActivity({ type: 'payout_feed', action: 'paused', actor: getActor(req), source: 'crm_api' });
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.post('/payout-feed/weeks/current/resume', asyncRoute(async (req, res) => {
+    const settings = await updatePayoutFeedSettings({ enabled: true, simulationEnabled: true, mode: 'SIMULATION' }, getActor(req));
+    await startPayoutFeedScheduler();
+    await logActivity({ type: 'payout_feed', action: 'resumed', actor: getActor(req), source: 'crm_api' });
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.get('/payout-feed/items', asyncRoute(async (req, res) => {
+    const page = parsePositiveInt(req.query.page, 1);
+    const limit = parsePositiveInt(req.query.limit || req.query.pageSize, 50, 200);
+    const params = [];
+    const where = [];
+    if (req.query.status) { params.push(String(req.query.status).toUpperCase()); where.push(`i.status = $${params.length}`); }
+    if (req.query.sourceType) { params.push(String(req.query.sourceType).toUpperCase()); where.push(`i.source_type = $${params.length}`); }
+    if (req.query.weekId) { params.push(req.query.weekId); where.push(`i.week_id = $${params.length}`); }
+    if (req.query.from) { params.push(new Date(String(req.query.from))); where.push(`i.scheduled_for >= $${params.length}`); }
+    if (req.query.to) { params.push(new Date(String(req.query.to))); where.push(`i.scheduled_for <= $${params.length}`); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    params.push(limit, (page - 1) * limit);
+    const result = await pool.query(
+      `
+      SELECT i.*, t.body_template
+      FROM discord_payout_feed_items i
+      LEFT JOIN discord_payout_feed_templates t ON t.id = i.template_id
+      ${whereSql}
+      ORDER BY i.scheduled_for DESC NULLS LAST, i.created_at DESC
+      LIMIT $${params.length - 1} OFFSET $${params.length}
+      `,
+      params
+    );
+    const count = await pool.query(`SELECT COUNT(*)::int AS count FROM discord_payout_feed_items i ${whereSql}`, params.slice(0, -2));
+    const items = result.rows.map(serializePayoutItem);
+    apiSuccess(res, items, { page, pageSize: limit, total: count.rows[0]?.count || 0, extra: { items } });
+  }));
+
+  router.get('/payout-feed/items/:id', asyncRoute(async (req, res) => {
+    const result = await pool.query(
+      `SELECT i.*, t.body_template FROM discord_payout_feed_items i LEFT JOIN discord_payout_feed_templates t ON t.id = i.template_id WHERE i.id = $1`,
+      [req.params.id]
+    );
+    if (!result.rowCount) throw createApiError('PAYOUT_ITEM_NOT_FOUND', 'Payout feed item not found', 404);
+    apiSuccess(res, serializePayoutItem(result.rows[0]));
+  }));
+
+  router.post('/payout-feed/items/:id/post-now', asyncRoute(async (req, res) => {
+    const claim = await pool.query(
+      `
+      UPDATE discord_payout_feed_items
+      SET status = 'PROCESSING', attempt_count = attempt_count + 1, updated_at = NOW()
+      WHERE id = $1 AND status IN ('GENERATED', 'SCHEDULED', 'FAILED', 'SKIPPED')
+      RETURNING *
+      `,
+      [req.params.id]
+    );
+    if (!claim.rowCount) throw createApiError('PAYOUT_ITEM_POST_UNAVAILABLE', 'Only unposted payout feed items can be posted manually', 400);
+    const item = claim.rows[0];
+    try {
+      const sent = await sendPayoutFeedItem(item);
+      const updated = await pool.query(
+        `UPDATE discord_payout_feed_items SET status = 'POSTED', discord_message_id = $2, posted_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = $1 RETURNING *`,
+        [item.id, sent.messageId]
+      );
+      await refreshPayoutWeekCounts(item.week_id);
+      await logActivity({ type: 'payout_feed', action: 'item_posted_manually', actor: getActor(req), source: 'crm_api', entityType: 'discord_payout_feed_item', entityId: String(item.id), metadata: sent });
+      apiSuccess(res, serializePayoutItem(updated.rows[0]), { extra: { item: serializePayoutItem(updated.rows[0]), sent } });
+    } catch (error) {
+      await pool.query(`UPDATE discord_payout_feed_items SET status = 'FAILED', last_error = $2, updated_at = NOW() WHERE id = $1`, [item.id, sanitizePublicErrorMessage(error)]);
+      await refreshPayoutWeekCounts(item.week_id);
+      throw error;
+    }
+  }));
+
+  router.post('/payout-feed/items/:id/retry', asyncRoute(async (req, res) => {
+    const result = await pool.query(
+      `UPDATE discord_payout_feed_items SET status = 'SCHEDULED', scheduled_for = COALESCE($2::timestamptz, NOW()), last_error = NULL, updated_at = NOW() WHERE id = $1 AND status IN ('FAILED', 'SKIPPED', 'CANCELLED') RETURNING *`,
+      [req.params.id, req.body.scheduledFor ? new Date(req.body.scheduledFor) : null]
+    );
+    if (!result.rowCount) throw createApiError('PAYOUT_ITEM_RETRY_UNAVAILABLE', 'Only failed, skipped or cancelled payout feed items can be retried', 400);
+    await refreshPayoutWeekCounts(result.rows[0].week_id);
+    await logActivity({ type: 'payout_feed', action: 'item_retry_requested', actor: getActor(req), source: 'crm_api', entityType: 'discord_payout_feed_item', entityId: String(req.params.id) });
+    apiSuccess(res, serializePayoutItem(result.rows[0]));
+  }));
+
+  router.post('/payout-feed/items/:id/skip', asyncRoute(async (req, res) => {
+    const result = await pool.query(
+      `UPDATE discord_payout_feed_items SET status = 'SKIPPED', last_error = 'Skipped by CRM admin', updated_at = NOW() WHERE id = $1 AND status IN ('GENERATED', 'SCHEDULED', 'FAILED') RETURNING *`,
+      [req.params.id]
+    );
+    if (!result.rowCount) throw createApiError('PAYOUT_ITEM_SKIP_UNAVAILABLE', 'Only unposted payout feed items can be skipped', 400);
+    await refreshPayoutWeekCounts(result.rows[0].week_id);
+    await logActivity({ type: 'payout_feed', action: 'item_skipped', actor: getActor(req), source: 'crm_api', entityType: 'discord_payout_feed_item', entityId: String(req.params.id) });
+    apiSuccess(res, serializePayoutItem(result.rows[0]));
+  }));
+
+  router.get('/payout-feed/templates', asyncRoute(async (req, res) => {
+    const result = await pool.query(`SELECT * FROM discord_payout_feed_templates ORDER BY source_type ASC, id ASC`);
+    const templates = result.rows.map(serializePayoutTemplate);
+    apiSuccess(res, templates, { total: templates.length, extra: { templates } });
+  }));
+
+  router.post('/payout-feed/templates', asyncRoute(async (req, res) => {
+    const name = String(req.body.name || '').trim();
+    const bodyTemplate = String(req.body.bodyTemplate || req.body.body_template || '').trim();
+    if (!name) throw createApiError('PAYOUT_TEMPLATE_NAME_REQUIRED', 'Template name is required', 400);
+    if (!bodyTemplate) throw createApiError('PAYOUT_TEMPLATE_BODY_REQUIRED', 'Template body is required', 400);
+    validateTextLength(bodyTemplate, 1800, 'Payout template body');
+    const sourceType = String(req.body.sourceType || 'SIMULATION').toUpperCase();
+    const result = await pool.query(
+      `
+      INSERT INTO discord_payout_feed_templates (name, enabled, weight, body_template, source_type)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+      `,
+      [name, toBoolean(req.body.enabled, true), Math.max(1, Number(req.body.weight || 1)), bodyTemplate, sourceType]
+    );
+    await logActivity({ type: 'payout_feed_template', action: 'created', actor: getActor(req), source: 'crm_api', entityType: 'discord_payout_feed_template', entityId: String(result.rows[0].id) });
+    const template = serializePayoutTemplate(result.rows[0]);
+    apiSuccess(res, template, { status: 201, extra: { template } });
+  }));
+
+  router.patch('/payout-feed/templates/:id', asyncRoute(async (req, res) => {
+    const current = await pool.query(`SELECT * FROM discord_payout_feed_templates WHERE id = $1`, [req.params.id]);
+    if (!current.rowCount) throw createApiError('PAYOUT_TEMPLATE_NOT_FOUND', 'Payout template not found', 404);
+    const name = String(req.body.name ?? current.rows[0].name).trim();
+    const bodyTemplate = String(req.body.bodyTemplate ?? req.body.body_template ?? current.rows[0].body_template).trim();
+    if (!name || !bodyTemplate) throw createApiError('PAYOUT_TEMPLATE_INVALID', 'Template name and body are required', 400);
+    const result = await pool.query(
+      `
+      UPDATE discord_payout_feed_templates
+      SET name = $2, enabled = $3, weight = $4, body_template = $5, source_type = $6, updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [req.params.id, name, toBoolean(req.body.enabled, current.rows[0].enabled), Math.max(1, Number(req.body.weight || current.rows[0].weight || 1)), bodyTemplate, String(req.body.sourceType || current.rows[0].source_type).toUpperCase()]
+    );
+    await logActivity({ type: 'payout_feed_template', action: 'updated', actor: getActor(req), source: 'crm_api', entityType: 'discord_payout_feed_template', entityId: String(req.params.id) });
+    const template = serializePayoutTemplate(result.rows[0]);
+    apiSuccess(res, template, { extra: { template } });
+  }));
+
+  router.delete('/payout-feed/templates/:id', asyncRoute(async (req, res) => {
+    const result = await pool.query(`DELETE FROM discord_payout_feed_templates WHERE id = $1`, [req.params.id]);
+    await logActivity({ type: 'payout_feed_template', action: 'deleted', actor: getActor(req), source: 'crm_api', entityType: 'discord_payout_feed_template', entityId: String(req.params.id) });
+    apiSuccess(res, { deleted: result.rowCount > 0 });
+  }));
+
+  router.post('/payout-feed/templates/:id/preview', asyncRoute(async (req, res) => {
+    const result = await pool.query(`SELECT * FROM discord_payout_feed_templates WHERE id = $1`, [req.params.id]);
+    if (!result.rowCount) throw createApiError('PAYOUT_TEMPLATE_NOT_FOUND', 'Payout template not found', 404);
+    const sample = {
+      flag: flagFromCountryCode(req.body.countryCode || 'GB'),
+      display_name: req.body.displayName || 'Alex T.',
+      amount: req.body.amount || 725,
+      currency: req.body.currency || 'USD',
+      formatted_amount: formatPayoutAmount(req.body.amount || 725, req.body.currency || 'USD'),
+      country_code: req.body.countryCode || 'GB',
+      country_name: payoutCountryName(req.body.countryCode || 'GB'),
+    };
+    apiSuccess(res, { content: renderPayoutTemplate(result.rows[0].body_template, sample), values: sample, template: serializePayoutTemplate(result.rows[0]) });
+  }));
+
   router.get('/news/overview', asyncRoute(async (req, res) => {
     const overview = await getNewsOverview();
     apiSuccess(res, overview, { extra: { overview } });
@@ -6040,4 +7250,13 @@ module.exports = {
   DEFAULT_NEWS_FEED_URL,
   DEFAULT_NEWS_TEMPLATES,
   localDateKey,
+  generatePayoutWeekPlanPure,
+  formatPayoutAmount,
+  flagFromCountryCode,
+  renderPayoutTemplate,
+  normalizePayoutSettings,
+  localDateParts,
+  DEFAULT_PAYOUT_SETTINGS,
+  DEFAULT_PAYOUT_TEMPLATES,
+  PAYOUT_POSTING_DAYS,
 };
