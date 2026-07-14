@@ -198,6 +198,155 @@ const DEFAULT_CORE_SETTINGS = {
   },
 };
 
+const NEWS_PROVIDER = 'FOREX_FACTORY';
+const DEFAULT_NEWS_FEED_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
+const DEFAULT_NEWS_CURRENCIES = ['USD', 'GBP', 'EUR', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF'];
+const OPTIONAL_NEWS_CURRENCIES = ['CNY'];
+const NEWS_IMPACTS = new Set(['HIGH', 'MEDIUM', 'LOW', 'HOLIDAY', 'NON_ECONOMIC', 'TENTATIVE']);
+const NEWS_ADVANCE_ALERT_TYPES = {
+  HIGH: 'HIGH_IMPACT_ADVANCE',
+  MEDIUM: 'MEDIUM_IMPACT_ADVANCE',
+  LOW: 'LOW_IMPACT_ADVANCE',
+};
+const NEWS_ALERT_STATUSES = new Set(['PENDING', 'PROCESSING', 'SENT', 'FAILED', 'CANCELLED', 'SKIPPED']);
+const NEWS_TEMPLATE_TYPES = new Set([
+  'DAILY_SUMMARY',
+  'HIGH_IMPACT_ADVANCE',
+  'MEDIUM_IMPACT_ADVANCE',
+  'LOW_IMPACT_ADVANCE',
+  'EVENT_TIME',
+  'CUSTOM',
+]);
+const NEWS_TEMPLATE_VARIABLES = [
+  'title',
+  'currency',
+  'country',
+  'impact',
+  'scheduled_at',
+  'uk_time',
+  'discord_time_full',
+  'discord_time_relative',
+  'forecast',
+  'previous',
+  'actual',
+  'forecast_or_na',
+  'previous_or_na',
+  'actual_or_na',
+  'minutes_before',
+  'event_url',
+  'event_list',
+  'event_count',
+  'date',
+];
+const NEWS_FETCH_TIMEOUT_MS = Number(process.env.DISCORD_NEWS_FETCH_TIMEOUT_MS || 12000);
+const NEWS_ALERT_POLL_MS = Number(process.env.DISCORD_NEWS_ALERT_POLL_MS || 60 * 1000);
+const NEWS_STALE_ALERT_GRACE_MINUTES = Number(process.env.DISCORD_NEWS_STALE_ALERT_GRACE_MINUTES || 30);
+const NEWS_USER_AGENT = process.env.DISCORD_NEWS_USER_AGENT || 'TTT-Markets-Discord-Bot/1.0 (+https://tttmarkets.com)';
+const DEFAULT_NEWS_REACTIONS = ['📊', '⚡', '👀'];
+const DEFAULT_NEWS_SETTINGS = {
+  enabled: false,
+  provider: NEWS_PROVIDER,
+  feedUrl: DEFAULT_NEWS_FEED_URL,
+  destinationChannelId: process.env.DISCORD_NEWS_CHANNEL_ID || process.env.ANNOUNCEMENTS_CHANNEL_ID || null,
+  timezone: 'Europe/London',
+  refreshIntervalMinutes: 15,
+  selectedCurrencies: DEFAULT_NEWS_CURRENCIES,
+  includeHighImpact: true,
+  includeMediumImpact: true,
+  includeLowImpact: false,
+  includeHolidays: false,
+  includeTentative: false,
+  dailySummaryEnabled: false,
+  dailySummaryTime: '07:00',
+  dailySummaryMentionEveryone: false,
+  highImpactAlertEnabled: true,
+  highImpactMinutesBefore: 15,
+  highImpactMentionEveryone: false,
+  mediumImpactAlertEnabled: false,
+  mediumImpactMinutesBefore: 15,
+  mediumImpactMentionEveryone: false,
+  lowImpactAlertEnabled: false,
+  lowImpactMinutesBefore: 15,
+  lowImpactMentionEveryone: false,
+  defaultReactions: DEFAULT_NEWS_REACTIONS,
+  highImpactTemplateId: null,
+  mediumImpactTemplateId: null,
+  lowImpactTemplateId: null,
+  dailySummaryTemplateId: null,
+  eventTimeTemplateId: null,
+};
+
+const DEFAULT_NEWS_TEMPLATES = [
+  {
+    name: 'High Impact Advance Alert',
+    templateType: 'HIGH_IMPACT_ADVANCE',
+    titleTemplate: '🔴 HIGH-IMPACT NEWS IN {{minutes_before}} MINUTES',
+    bodyTemplate:
+      '**{{currency}} — {{title}}**\n\n' +
+      '🕒 **Scheduled:** {{discord_time_full}}\n' +
+      '⏳ **Starts:** {{discord_time_relative}}\n' +
+      '📊 **Forecast:** {{forecast_or_na}}\n' +
+      '📉 **Previous:** {{previous_or_na}}\n\n' +
+      'Significant market volatility may occur before, during and after this economic release.',
+    colour: '#dc2626',
+    reactions: DEFAULT_NEWS_REACTIONS,
+  },
+  {
+    name: 'Medium Impact Advance Alert',
+    templateType: 'MEDIUM_IMPACT_ADVANCE',
+    titleTemplate: '🟠 MEDIUM-IMPACT NEWS IN {{minutes_before}} MINUTES',
+    bodyTemplate:
+      '**{{currency}} — {{title}}**\n\n' +
+      '🕒 **Scheduled:** {{discord_time_full}}\n' +
+      '⏳ **Starts:** {{discord_time_relative}}\n' +
+      '📊 **Forecast:** {{forecast_or_na}}\n' +
+      '📉 **Previous:** {{previous_or_na}}\n\n' +
+      'Please be aware that market activity may increase around this economic release.',
+    colour: '#f97316',
+    reactions: DEFAULT_NEWS_REACTIONS,
+  },
+  {
+    name: 'Low Impact Advance Alert',
+    templateType: 'LOW_IMPACT_ADVANCE',
+    titleTemplate: '🟡 ECONOMIC NEWS IN {{minutes_before}} MINUTES',
+    bodyTemplate:
+      '**{{currency}} — {{title}}**\n\n' +
+      '🕒 **Scheduled:** {{discord_time_full}}\n' +
+      '📊 **Forecast:** {{forecast_or_na}}\n' +
+      '📉 **Previous:** {{previous_or_na}}',
+    colour: '#eab308',
+    reactions: DEFAULT_NEWS_REACTIONS,
+  },
+  {
+    name: 'Daily Economic News Summary',
+    templateType: 'DAILY_SUMMARY',
+    titleTemplate: "📅 TODAY'S ECONOMIC NEWS",
+    bodyTemplate:
+      'The following selected economic events are scheduled today:\n\n' +
+      '{{event_list}}\n\n' +
+      'Times are shown using Discord local timestamps.',
+    colour: '#f35023',
+    reactions: DEFAULT_NEWS_REACTIONS,
+  },
+  {
+    name: 'Economic Event Starting Now',
+    templateType: 'EVENT_TIME',
+    titleTemplate: '🚨 ECONOMIC NEWS EVENT',
+    bodyTemplate:
+      '**{{currency}} — {{title}}**\n\n' +
+      'This event is scheduled now.\n\n' +
+      '📊 **Forecast:** {{forecast_or_na}}\n' +
+      '📉 **Previous:** {{previous_or_na}}',
+    colour: '#f35023',
+    reactions: DEFAULT_NEWS_REACTIONS,
+  },
+];
+
+let newsRefreshIntervalHandle = null;
+let newsAlertIntervalHandle = null;
+let newsSyncRunning = false;
+let newsAlertPollRunning = false;
+
 const DEFAULT_CHANNEL_MAPPINGS = {
   general: process.env.GENERAL_CHANNEL_ID || null,
   announcements: process.env.ANNOUNCEMENTS_CHANNEL_ID || null,
@@ -481,6 +630,154 @@ async function initDB() {
     );
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_news_settings (
+      id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+      enabled BOOLEAN NOT NULL DEFAULT false,
+      provider TEXT NOT NULL DEFAULT 'FOREX_FACTORY',
+      feed_url TEXT NOT NULL DEFAULT '${DEFAULT_NEWS_FEED_URL}',
+      destination_channel_id TEXT,
+      timezone TEXT NOT NULL DEFAULT 'Europe/London',
+      refresh_interval_minutes INTEGER NOT NULL DEFAULT 15,
+      selected_currencies JSONB NOT NULL DEFAULT '["USD","GBP","EUR","JPY","CAD","AUD","NZD","CHF"]'::jsonb,
+      include_high_impact BOOLEAN NOT NULL DEFAULT true,
+      include_medium_impact BOOLEAN NOT NULL DEFAULT true,
+      include_low_impact BOOLEAN NOT NULL DEFAULT false,
+      include_holidays BOOLEAN NOT NULL DEFAULT false,
+      include_tentative BOOLEAN NOT NULL DEFAULT false,
+      daily_summary_enabled BOOLEAN NOT NULL DEFAULT false,
+      daily_summary_time TEXT NOT NULL DEFAULT '07:00',
+      daily_summary_mention_everyone BOOLEAN NOT NULL DEFAULT false,
+      high_impact_alert_enabled BOOLEAN NOT NULL DEFAULT true,
+      high_impact_minutes_before INTEGER NOT NULL DEFAULT 15,
+      high_impact_mention_everyone BOOLEAN NOT NULL DEFAULT false,
+      medium_impact_alert_enabled BOOLEAN NOT NULL DEFAULT false,
+      medium_impact_minutes_before INTEGER NOT NULL DEFAULT 15,
+      medium_impact_mention_everyone BOOLEAN NOT NULL DEFAULT false,
+      low_impact_alert_enabled BOOLEAN NOT NULL DEFAULT false,
+      low_impact_minutes_before INTEGER NOT NULL DEFAULT 15,
+      low_impact_mention_everyone BOOLEAN NOT NULL DEFAULT false,
+      default_reactions JSONB NOT NULL DEFAULT '["📊","⚡","👀"]'::jsonb,
+      high_impact_template_id BIGINT,
+      medium_impact_template_id BIGINT,
+      low_impact_template_id BIGINT,
+      daily_summary_template_id BIGINT,
+      event_time_template_id BIGINT,
+      updated_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`ALTER TABLE discord_news_settings ADD COLUMN IF NOT EXISTS high_impact_template_id BIGINT;`);
+  await pool.query(`ALTER TABLE discord_news_settings ADD COLUMN IF NOT EXISTS medium_impact_template_id BIGINT;`);
+  await pool.query(`ALTER TABLE discord_news_settings ADD COLUMN IF NOT EXISTS low_impact_template_id BIGINT;`);
+  await pool.query(`ALTER TABLE discord_news_settings ADD COLUMN IF NOT EXISTS daily_summary_template_id BIGINT;`);
+  await pool.query(`ALTER TABLE discord_news_settings ADD COLUMN IF NOT EXISTS event_time_template_id BIGINT;`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_news_events (
+      id BIGSERIAL PRIMARY KEY,
+      provider TEXT NOT NULL,
+      provider_event_key TEXT UNIQUE NOT NULL,
+      title TEXT NOT NULL,
+      currency TEXT,
+      country TEXT,
+      impact TEXT NOT NULL,
+      scheduled_at TIMESTAMPTZ NOT NULL,
+      forecast TEXT,
+      previous TEXT,
+      actual TEXT,
+      source_url TEXT,
+      raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      cancelled BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_news_templates (
+      id BIGSERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      template_type TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      title_template TEXT NOT NULL,
+      body_template TEXT NOT NULL,
+      colour TEXT,
+      image_url TEXT,
+      thumbnail_url TEXT,
+      footer_text TEXT,
+      buttons JSONB NOT NULL DEFAULT '[]'::jsonb,
+      reactions JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_by TEXT
+    );
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS discord_news_templates_type_name_key
+    ON discord_news_templates (template_type, name);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_news_alerts (
+      id BIGSERIAL PRIMARY KEY,
+      news_event_id BIGINT REFERENCES discord_news_events(id) ON DELETE CASCADE,
+      alert_type TEXT NOT NULL,
+      scheduled_for TIMESTAMPTZ NOT NULL,
+      destination_channel_id TEXT,
+      mention_everyone BOOLEAN NOT NULL DEFAULT false,
+      template_id BIGINT REFERENCES discord_news_templates(id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      discord_message_id TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      sent_at TIMESTAMPTZ,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`ALTER TABLE discord_news_alerts ADD COLUMN IF NOT EXISTS template_id BIGINT REFERENCES discord_news_templates(id) ON DELETE SET NULL;`);
+  await pool.query(`ALTER TABLE discord_news_alerts ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;`);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS discord_news_alerts_dedupe_key
+    ON discord_news_alerts (COALESCE(news_event_id, 0), alert_type, COALESCE(destination_channel_id, ''), scheduled_for);
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS discord_news_alerts_due_idx ON discord_news_alerts (status, scheduled_for);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS discord_news_events_schedule_idx ON discord_news_events (scheduled_at, currency, impact);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_news_sync_logs (
+      id BIGSERIAL PRIMARY KEY,
+      provider TEXT NOT NULL,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ,
+      status TEXT NOT NULL,
+      events_received INTEGER NOT NULL DEFAULT 0,
+      events_created INTEGER NOT NULL DEFAULT 0,
+      events_updated INTEGER NOT NULL DEFAULT 0,
+      alerts_created INTEGER NOT NULL DEFAULT 0,
+      error_code TEXT,
+      error_message TEXT
+    );
+  `);
+
+  await pool.query(
+    `
+    INSERT INTO discord_news_settings (id, destination_channel_id)
+    VALUES (1, $1)
+    ON CONFLICT (id) DO NOTHING
+    `,
+    [DEFAULT_NEWS_SETTINGS.destinationChannelId]
+  );
+
   for (const [key, value] of Object.entries(DEFAULT_STATS)) {
     await pool.query(
       `
@@ -497,6 +794,7 @@ async function initDB() {
   await ensureSetting('youtube', DEFAULT_YOUTUBE_SETTINGS, 'youtube');
   await ensureSetting('channel_mappings', DEFAULT_CHANNEL_MAPPINGS, 'mappings');
   await ensureSetting('role_mappings', DEFAULT_ROLE_MAPPINGS, 'mappings');
+  await seedNewsTemplates();
 
   for (const [key, channelId] of Object.entries(DEFAULT_CHANNEL_MAPPINGS)) {
     await pool.query(
@@ -1220,6 +1518,1047 @@ function serializeActivityLog(row) {
     metadata,
     createdAt: row.created_at,
     updatedAt: row.updated_at || row.created_at,
+  };
+}
+
+function normalizeNewsImpact(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(/[_-]+/g, ' ');
+  if (!raw) return 'LOW';
+  if (raw.includes('high')) return 'HIGH';
+  if (raw.includes('medium') || raw.includes('med')) return 'MEDIUM';
+  if (raw.includes('low')) return 'LOW';
+  if (raw.includes('holiday')) return 'HOLIDAY';
+  if (raw.includes('tentative')) return 'TENTATIVE';
+  if (raw.includes('non') || raw.includes('none')) return 'NON_ECONOMIC';
+  return 'LOW';
+}
+
+function normalizeNewsCurrency(value) {
+  const currency = String(value || '').trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(currency) ? currency : null;
+}
+
+function normalizeNewsSettingRow(row) {
+  if (!row) return { ...DEFAULT_NEWS_SETTINGS };
+  return {
+    enabled: Boolean(row.enabled),
+    provider: row.provider || NEWS_PROVIDER,
+    feedUrl: row.feed_url || DEFAULT_NEWS_FEED_URL,
+    destinationChannelId: row.destination_channel_id || null,
+    timezone: row.timezone || 'Europe/London',
+    refreshIntervalMinutes: Math.max(1, Number(row.refresh_interval_minutes || 15)),
+    selectedCurrencies: Array.isArray(row.selected_currencies) ? row.selected_currencies : DEFAULT_NEWS_CURRENCIES,
+    includeHighImpact: Boolean(row.include_high_impact),
+    includeMediumImpact: Boolean(row.include_medium_impact),
+    includeLowImpact: Boolean(row.include_low_impact),
+    includeHolidays: Boolean(row.include_holidays),
+    includeTentative: Boolean(row.include_tentative),
+    dailySummaryEnabled: Boolean(row.daily_summary_enabled),
+    dailySummaryTime: row.daily_summary_time || '07:00',
+    dailySummaryMentionEveryone: Boolean(row.daily_summary_mention_everyone),
+    highImpactAlertEnabled: Boolean(row.high_impact_alert_enabled),
+    highImpactMinutesBefore: Number(row.high_impact_minutes_before || 15),
+    highImpactMentionEveryone: Boolean(row.high_impact_mention_everyone),
+    mediumImpactAlertEnabled: Boolean(row.medium_impact_alert_enabled),
+    mediumImpactMinutesBefore: Number(row.medium_impact_minutes_before || 15),
+    mediumImpactMentionEveryone: Boolean(row.medium_impact_mention_everyone),
+    lowImpactAlertEnabled: Boolean(row.low_impact_alert_enabled),
+    lowImpactMinutesBefore: Number(row.low_impact_minutes_before || 15),
+    lowImpactMentionEveryone: Boolean(row.low_impact_mention_everyone),
+    defaultReactions: sanitizeReactions(row.default_reactions, DEFAULT_NEWS_REACTIONS),
+    highImpactTemplateId: row.high_impact_template_id || null,
+    mediumImpactTemplateId: row.medium_impact_template_id || null,
+    lowImpactTemplateId: row.low_impact_template_id || null,
+    dailySummaryTemplateId: row.daily_summary_template_id || null,
+    eventTimeTemplateId: row.event_time_template_id || null,
+    updatedBy: row.updated_by || null,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+  };
+}
+
+async function getNewsSettings() {
+  const result = await pool.query(`SELECT * FROM discord_news_settings WHERE id = 1`);
+  if (!result.rowCount) {
+    await pool.query(
+      `
+      INSERT INTO discord_news_settings (id, destination_channel_id)
+      VALUES (1, $1)
+      ON CONFLICT (id) DO NOTHING
+      `,
+      [DEFAULT_NEWS_SETTINGS.destinationChannelId]
+    );
+    return { ...DEFAULT_NEWS_SETTINGS };
+  }
+  return normalizeNewsSettingRow(result.rows[0]);
+}
+
+function validateNewsFeedUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || DEFAULT_NEWS_FEED_URL).trim());
+  } catch (_) {
+    throw createApiError('NEWS_FEED_URL_INVALID', 'Feed URL must be a valid HTTPS URL', 400);
+  }
+  if (url.protocol !== 'https:') {
+    throw createApiError('NEWS_FEED_URL_HTTPS_REQUIRED', 'Feed URL must use HTTPS', 400);
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    hostname.endsWith('.internal') ||
+    hostname.endsWith('.railway.internal') ||
+    /^(127\.|10\.|192\.168\.|169\.254\.|0\.|::1$|fc00:|fd00:)/i.test(hostname)
+  ) {
+    throw createApiError('NEWS_FEED_URL_BLOCKED', 'Feed URL cannot target private or internal hosts', 400);
+  }
+  return url.toString();
+}
+
+function sanitizeNewsSettingsPatch(body = {}) {
+  const patch = {};
+  if (Object.prototype.hasOwnProperty.call(body, 'enabled')) patch.enabled = toBoolean(body.enabled, false);
+  if (body.provider) patch.provider = String(body.provider).trim().toUpperCase().slice(0, 50) || NEWS_PROVIDER;
+  if (Object.prototype.hasOwnProperty.call(body, 'feedUrl') || Object.prototype.hasOwnProperty.call(body, 'feed_url')) {
+    patch.feedUrl = validateNewsFeedUrl(body.feedUrl || body.feed_url);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'destinationChannelId') || Object.prototype.hasOwnProperty.call(body, 'destination_channel_id')) {
+    const channelId = body.destinationChannelId || body.destination_channel_id || null;
+    patch.destinationChannelId = channelId ? requireDiscordId(channelId, 'Destination channel ID') : null;
+  }
+  if (body.timezone) patch.timezone = String(body.timezone).trim().slice(0, 80) || 'Europe/London';
+  if (Object.prototype.hasOwnProperty.call(body, 'refreshIntervalMinutes')) {
+    patch.refreshIntervalMinutes = Math.max(5, Math.min(Number(body.refreshIntervalMinutes) || 15, 1440));
+  }
+  if (Array.isArray(body.selectedCurrencies)) {
+    const selected = body.selectedCurrencies
+      .map(normalizeNewsCurrency)
+      .filter(Boolean);
+    patch.selectedCurrencies = selected.length ? Array.from(new Set(selected)).slice(0, 60) : [];
+  }
+  const booleanKeys = [
+    'includeHighImpact',
+    'includeMediumImpact',
+    'includeLowImpact',
+    'includeHolidays',
+    'includeTentative',
+    'dailySummaryEnabled',
+    'dailySummaryMentionEveryone',
+    'highImpactAlertEnabled',
+    'highImpactMentionEveryone',
+    'mediumImpactAlertEnabled',
+    'mediumImpactMentionEveryone',
+    'lowImpactAlertEnabled',
+    'lowImpactMentionEveryone',
+  ];
+  for (const key of booleanKeys) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = toBoolean(body[key], false);
+  }
+  const minuteKeys = ['highImpactMinutesBefore', 'mediumImpactMinutesBefore', 'lowImpactMinutesBefore'];
+  for (const key of minuteKeys) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = Math.max(0, Math.min(Number(body[key]) || 0, 1440));
+  }
+  if (body.dailySummaryTime) {
+    const time = String(body.dailySummaryTime).trim();
+    if (!/^\d{2}:\d{2}$/.test(time)) throw createApiError('NEWS_DAILY_TIME_INVALID', 'Daily summary time must be HH:mm', 400);
+    patch.dailySummaryTime = time;
+  }
+  if (Array.isArray(body.defaultReactions)) patch.defaultReactions = sanitizeReactions(body.defaultReactions, DEFAULT_NEWS_REACTIONS).slice(0, 20);
+  for (const key of ['highImpactTemplateId', 'mediumImpactTemplateId', 'lowImpactTemplateId', 'dailySummaryTemplateId', 'eventTimeTemplateId']) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = body[key] ? Number(body[key]) : null;
+  }
+  return patch;
+}
+
+async function updateNewsSettings(patch, actor = null) {
+  const current = await getNewsSettings();
+  const next = { ...current, ...patch };
+  await pool.query(
+    `
+    UPDATE discord_news_settings
+    SET enabled = $1,
+        provider = $2,
+        feed_url = $3,
+        destination_channel_id = $4,
+        timezone = $5,
+        refresh_interval_minutes = $6,
+        selected_currencies = $7::jsonb,
+        include_high_impact = $8,
+        include_medium_impact = $9,
+        include_low_impact = $10,
+        include_holidays = $11,
+        include_tentative = $12,
+        daily_summary_enabled = $13,
+        daily_summary_time = $14,
+        daily_summary_mention_everyone = $15,
+        high_impact_alert_enabled = $16,
+        high_impact_minutes_before = $17,
+        high_impact_mention_everyone = $18,
+        medium_impact_alert_enabled = $19,
+        medium_impact_minutes_before = $20,
+        medium_impact_mention_everyone = $21,
+        low_impact_alert_enabled = $22,
+        low_impact_minutes_before = $23,
+        low_impact_mention_everyone = $24,
+        default_reactions = $25::jsonb,
+        high_impact_template_id = $26,
+        medium_impact_template_id = $27,
+        low_impact_template_id = $28,
+        daily_summary_template_id = $29,
+        event_time_template_id = $30,
+        updated_by = $31,
+        updated_at = NOW()
+    WHERE id = 1
+    RETURNING *
+    `,
+    [
+      next.enabled,
+      next.provider,
+      next.feedUrl,
+      next.destinationChannelId,
+      next.timezone,
+      next.refreshIntervalMinutes,
+      JSON.stringify(next.selectedCurrencies || []),
+      next.includeHighImpact,
+      next.includeMediumImpact,
+      next.includeLowImpact,
+      next.includeHolidays,
+      next.includeTentative,
+      next.dailySummaryEnabled,
+      next.dailySummaryTime,
+      next.dailySummaryMentionEveryone,
+      next.highImpactAlertEnabled,
+      next.highImpactMinutesBefore,
+      next.highImpactMentionEveryone,
+      next.mediumImpactAlertEnabled,
+      next.mediumImpactMinutesBefore,
+      next.mediumImpactMentionEveryone,
+      next.lowImpactAlertEnabled,
+      next.lowImpactMinutesBefore,
+      next.lowImpactMentionEveryone,
+      JSON.stringify(next.defaultReactions || DEFAULT_NEWS_REACTIONS),
+      next.highImpactTemplateId,
+      next.mediumImpactTemplateId,
+      next.lowImpactTemplateId,
+      next.dailySummaryTemplateId,
+      next.eventTimeTemplateId,
+      actor,
+    ]
+  );
+  return getNewsSettings();
+}
+
+function stableNewsEventKey(provider, event) {
+  const value = [
+    provider || NEWS_PROVIDER,
+    event.title || '',
+    event.currency || '',
+    new Date(event.scheduledAt).toISOString(),
+  ].join('|').toLowerCase();
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function newsEventIdentityKey(event) {
+  return [
+    String(event.title || '').trim().toLowerCase().replace(/\s+/g, ' '),
+    String(event.currency || '').trim().toUpperCase(),
+  ].join('|');
+}
+
+function parseNewsDate(raw) {
+  if (!raw) return null;
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) return raw;
+  const value = String(raw).trim();
+  if (!value) return null;
+  const direct = new Date(value);
+  if (!Number.isNaN(direct.getTime())) return direct;
+  const normalized = value.replace(/^(\d{4})(\d{2})(\d{2})\s+/, '$1-$2-$3T');
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeForexFactoryEvent(row, provider = NEWS_PROVIDER) {
+  const title = String(row.title || row.event || row.name || '').trim();
+  const countryValue = String(row.country || '').trim();
+  const currency = normalizeNewsCurrency(row.currency || row.ccy || row.countryCode || countryValue);
+  const scheduledAt = parseNewsDate(row.date || row.datetime || row.time || row.timestamp || row.scheduled_at);
+  if (!title || !currency || !scheduledAt) return null;
+  const impact = normalizeNewsImpact(row.impact || row.importance || row.severity);
+  return {
+    provider,
+    title,
+    currency,
+    country: normalizeNewsCurrency(countryValue) ? null : (countryValue || row.country_name || null),
+    impact,
+    scheduledAt,
+    forecast: row.forecast == null ? null : String(row.forecast),
+    previous: row.previous == null ? null : String(row.previous),
+    actual: row.actual == null ? null : String(row.actual),
+    sourceUrl: row.url || row.source_url || row.link || null,
+    rawPayload: row,
+  };
+}
+
+function normalizeForexFactoryPayload(payload, provider = NEWS_PROVIDER) {
+  const rows = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.events)
+      ? payload.events
+      : Array.isArray(payload?.calendar)
+        ? payload.calendar
+        : null;
+  if (!rows) throw createApiError('NEWS_FEED_SHAPE_INVALID', 'Feed JSON must be an array or contain an events array', 502);
+  return rows.map(row => normalizeForexFactoryEvent(row, provider)).filter(Boolean);
+}
+
+async function fetchNewsFeed(feedUrl, { retries = 2 } = {}) {
+  const safeUrl = validateNewsFeedUrl(feedUrl || DEFAULT_NEWS_FEED_URL);
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), NEWS_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(safeUrl, {
+        headers: { 'User-Agent': NEWS_USER_AGENT, Accept: 'application/json,text/json;q=0.9' },
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      const contentType = response.headers.get('content-type') || '';
+      const text = await response.text();
+      if (!response.ok) throw createApiError('NEWS_FEED_HTTP_ERROR', `Feed returned HTTP ${response.status}`, 502);
+      if (/^\s*</.test(text) || contentType.includes('text/html')) throw createApiError('NEWS_FEED_HTML_RESPONSE', 'Feed returned HTML instead of JSON', 502);
+      if (text.length > 5_000_000) throw createApiError('NEWS_FEED_TOO_LARGE', 'Feed response is too large', 502);
+      return JSON.parse(text);
+    } catch (error) {
+      clearTimeout(timeout);
+      lastError = error;
+      if (attempt < retries) await sleep(500 * (attempt + 1));
+    }
+  }
+  throw lastError || createApiError('NEWS_FEED_FETCH_FAILED', 'Feed fetch failed', 502);
+}
+
+function newsEventPassesFilters(event, settings) {
+  const currencies = Array.isArray(settings.selectedCurrencies) ? settings.selectedCurrencies.map(normalizeNewsCurrency).filter(Boolean) : [];
+  if (currencies.length && !currencies.includes(event.currency)) return false;
+  if (event.impact === 'HIGH') return settings.includeHighImpact;
+  if (event.impact === 'MEDIUM') return settings.includeMediumImpact;
+  if (event.impact === 'LOW') return settings.includeLowImpact;
+  if (event.impact === 'HOLIDAY') return settings.includeHolidays;
+  if (event.impact === 'TENTATIVE') return settings.includeTentative;
+  return false;
+}
+
+function alertConfigForImpact(impact, settings) {
+  if (impact === 'HIGH') return {
+    enabled: settings.highImpactAlertEnabled,
+    minutesBefore: settings.highImpactMinutesBefore,
+    mentionEveryone: settings.highImpactMentionEveryone,
+    templateId: settings.highImpactTemplateId,
+    alertType: 'HIGH_IMPACT_ADVANCE',
+  };
+  if (impact === 'MEDIUM') return {
+    enabled: settings.mediumImpactAlertEnabled,
+    minutesBefore: settings.mediumImpactMinutesBefore,
+    mentionEveryone: settings.mediumImpactMentionEveryone,
+    templateId: settings.mediumImpactTemplateId,
+    alertType: 'MEDIUM_IMPACT_ADVANCE',
+  };
+  if (impact === 'LOW') return {
+    enabled: settings.lowImpactAlertEnabled,
+    minutesBefore: settings.lowImpactMinutesBefore,
+    mentionEveryone: settings.lowImpactMentionEveryone,
+    templateId: settings.lowImpactTemplateId,
+    alertType: 'LOW_IMPACT_ADVANCE',
+  };
+  return null;
+}
+
+function formatInTimezone(date, timezone = 'Europe/London', options = {}) {
+  try {
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone: timezone,
+      dateStyle: options.dateStyle || 'medium',
+      timeStyle: options.timeStyle || 'short',
+    }).format(date);
+  } catch (_) {
+    return date.toISOString();
+  }
+}
+
+function newsTemplateValues(event, settings = DEFAULT_NEWS_SETTINGS, extra = {}) {
+  const scheduled = event?.scheduled_at || event?.scheduledAt ? new Date(event.scheduled_at || event.scheduledAt) : new Date();
+  const unix = Math.floor(scheduled.getTime() / 1000);
+  return {
+    title: event?.title || '',
+    currency: event?.currency || '',
+    country: event?.country || '',
+    impact: event?.impact || '',
+    scheduled_at: scheduled.toISOString(),
+    uk_time: formatInTimezone(scheduled, 'Europe/London'),
+    discord_time_full: `<t:${unix}:F>`,
+    discord_time_relative: `<t:${unix}:R>`,
+    forecast: event?.forecast || '',
+    previous: event?.previous || '',
+    actual: event?.actual || '',
+    forecast_or_na: event?.forecast || 'N/A',
+    previous_or_na: event?.previous || 'N/A',
+    actual_or_na: event?.actual || 'N/A',
+    minutes_before: extra.minutesBefore ?? '',
+    event_url: event?.source_url || event?.sourceUrl || '',
+    event_list: extra.eventList || '',
+    event_count: extra.eventCount ?? '',
+    date: extra.date || formatInTimezone(scheduled, settings.timezone || 'Europe/London', { dateStyle: 'full', timeStyle: undefined }),
+  };
+}
+
+function renderNewsTemplateString(template, values) {
+  return String(template || '').replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
+    return values[key] === undefined || values[key] === null ? '' : String(values[key]);
+  });
+}
+
+function sanitizeNewsTemplatePayload(body = {}, existing = {}) {
+  const templateType = String(body.templateType || body.template_type || existing.template_type || existing.templateType || 'CUSTOM').trim().toUpperCase();
+  if (!NEWS_TEMPLATE_TYPES.has(templateType)) throw createApiError('NEWS_TEMPLATE_TYPE_INVALID', 'Invalid news template type', 400);
+  const name = String(body.name ?? existing.name ?? '').trim();
+  if (!name) throw createApiError('NEWS_TEMPLATE_NAME_REQUIRED', 'Template name is required', 400);
+  const titleTemplate = String(body.titleTemplate ?? body.title_template ?? existing.title_template ?? existing.titleTemplate ?? '').trim();
+  const bodyTemplate = String(body.bodyTemplate ?? body.body_template ?? existing.body_template ?? existing.bodyTemplate ?? '').trim();
+  if (!titleTemplate || !bodyTemplate) throw createApiError('NEWS_TEMPLATE_BODY_REQUIRED', 'Title and body templates are required', 400);
+  validateTextLength(titleTemplate, 256, 'News template title');
+  validateTextLength(bodyTemplate, 4096, 'News template body');
+  return {
+    name,
+    templateType,
+    enabled: toBoolean(body.enabled, existing.enabled ?? true),
+    titleTemplate,
+    bodyTemplate,
+    colour: body.colour || body.color || existing.colour || existing.color || '#f35023',
+    imageUrl: body.imageUrl || body.image_url || existing.image_url || existing.imageUrl || null,
+    thumbnailUrl: body.thumbnailUrl || body.thumbnail_url || existing.thumbnail_url || existing.thumbnailUrl || null,
+    footerText: body.footerText || body.footer_text || existing.footer_text || existing.footerText || BRAND_FOOTER,
+    buttons: sanitizeButtons(body.buttons ?? existing.buttons ?? [], { allowMailto: true, dropInvalid: true }),
+    reactions: sanitizeReactions(body.reactions ?? existing.reactions ?? DEFAULT_NEWS_REACTIONS, DEFAULT_NEWS_REACTIONS),
+  };
+}
+
+function serializeNewsTemplate(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.template_type,
+    templateType: row.template_type,
+    enabled: Boolean(row.enabled),
+    titleTemplate: row.title_template,
+    bodyTemplate: row.body_template,
+    colour: row.colour,
+    color: row.colour,
+    imageUrl: row.image_url,
+    thumbnailUrl: row.thumbnail_url,
+    footerText: row.footer_text,
+    buttons: row.buttons || [],
+    reactions: row.reactions || [],
+    updatedBy: row.updated_by || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    variableHelpers: NEWS_TEMPLATE_VARIABLES,
+  };
+}
+
+async function seedNewsTemplates() {
+  for (const template of DEFAULT_NEWS_TEMPLATES) {
+    await pool.query(
+      `
+      INSERT INTO discord_news_templates
+        (name, template_type, enabled, title_template, body_template, colour, footer_text, buttons, reactions)
+      VALUES ($1, $2, true, $3, $4, $5, $6, $7::jsonb, $8::jsonb)
+      ON CONFLICT (template_type, name) DO NOTHING
+      `,
+      [
+        template.name,
+        template.templateType,
+        template.titleTemplate,
+        template.bodyTemplate,
+        template.colour,
+        BRAND_FOOTER,
+        JSON.stringify([]),
+        JSON.stringify(template.reactions || DEFAULT_NEWS_REACTIONS),
+      ]
+    );
+  }
+}
+
+async function getNewsTemplateForAlert(alertType, settings, explicitTemplateId = null) {
+  const configuredId = explicitTemplateId
+    || (alertType === 'HIGH_IMPACT_ADVANCE' ? settings.highImpactTemplateId
+      : alertType === 'MEDIUM_IMPACT_ADVANCE' ? settings.mediumImpactTemplateId
+        : alertType === 'LOW_IMPACT_ADVANCE' ? settings.lowImpactTemplateId
+          : alertType === 'DAILY_SUMMARY' ? settings.dailySummaryTemplateId
+            : alertType === 'EVENT_TIME' ? settings.eventTimeTemplateId
+              : null);
+  if (configuredId) {
+    const result = await pool.query(`SELECT * FROM discord_news_templates WHERE id = $1 AND enabled = true`, [configuredId]);
+    if (result.rowCount) return result.rows[0];
+  }
+  const fallback = await pool.query(
+    `SELECT * FROM discord_news_templates WHERE template_type = $1 AND enabled = true ORDER BY id ASC LIMIT 1`,
+    [alertType]
+  );
+  return fallback.rows[0] || null;
+}
+
+function serializeNewsEvent(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    provider: row.provider,
+    providerEventKey: row.provider_event_key,
+    title: row.title,
+    currency: row.currency,
+    country: row.country,
+    impact: row.impact,
+    scheduledAt: row.scheduled_at,
+    forecast: row.forecast,
+    previous: row.previous,
+    actual: row.actual,
+    sourceUrl: row.source_url,
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+    cancelled: Boolean(row.cancelled),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function serializeNewsAlert(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    newsEventId: row.news_event_id,
+    alertType: row.alert_type,
+    scheduledFor: row.scheduled_for,
+    destinationChannelId: row.destination_channel_id,
+    mentionEveryone: Boolean(row.mention_everyone),
+    templateId: row.template_id || null,
+    status: row.status,
+    discordMessageId: row.discord_message_id,
+    attemptCount: Number(row.attempt_count || 0),
+    lastError: row.last_error,
+    sentAt: row.sent_at,
+    metadata: row.metadata || {},
+    event: row.title ? serializeNewsEvent(row) : undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function upsertNewsEvent(event, settings) {
+  const providerEventKey = stableNewsEventKey(event.provider, event);
+  const identity = newsEventIdentityKey(event);
+  const weekStart = new Date(event.scheduledAt);
+  weekStart.setUTCDate(weekStart.getUTCDate() - 7);
+  const weekEnd = new Date(event.scheduledAt);
+  weekEnd.setUTCDate(weekEnd.getUTCDate() + 7);
+
+  let existing = await pool.query(
+    `SELECT * FROM discord_news_events WHERE provider_event_key = $1`,
+    [providerEventKey]
+  );
+
+  if (!existing.rowCount) {
+    existing = await pool.query(
+      `
+      SELECT *
+      FROM discord_news_events
+      WHERE provider = $1
+        AND LOWER(TRIM(title)) = LOWER(TRIM($2))
+        AND COALESCE(currency, '') = COALESCE($3, '')
+        AND scheduled_at BETWEEN $4 AND $5
+        AND cancelled = false
+      ORDER BY ABS(EXTRACT(EPOCH FROM (scheduled_at - $6::timestamptz))) ASC
+      LIMIT 1
+      `,
+      [event.provider, event.title, event.currency, weekStart, weekEnd, event.scheduledAt]
+    );
+  }
+
+  if (existing.rowCount) {
+    const row = existing.rows[0];
+    const timeChanged = new Date(row.scheduled_at).getTime() !== event.scheduledAt.getTime();
+    if (timeChanged) {
+      await pool.query(
+        `
+        UPDATE discord_news_alerts
+        SET status = 'CANCELLED', last_error = 'Event time changed; replacement alert scheduled.', updated_at = NOW()
+        WHERE news_event_id = $1 AND status IN ('PENDING', 'FAILED')
+        `,
+        [row.id]
+      );
+      await logActivity({
+        type: 'news',
+        action: 'event_time_changed',
+        source: 'bot',
+        entityType: 'discord_news_event',
+        entityId: String(row.id),
+        metadata: { oldScheduledAt: row.scheduled_at, newScheduledAt: event.scheduledAt, identity },
+      });
+    }
+    const updated = await pool.query(
+      `
+      UPDATE discord_news_events
+      SET provider_event_key = $2,
+          title = $3,
+          currency = $4,
+          country = $5,
+          impact = $6,
+          scheduled_at = $7,
+          forecast = $8,
+          previous = $9,
+          actual = $10,
+          source_url = $11,
+          raw_payload = $12::jsonb,
+          last_seen_at = NOW(),
+          updated_at = NOW(),
+          cancelled = false
+      WHERE id = $1
+      RETURNING *
+      `,
+      [
+        row.id,
+        providerEventKey,
+        event.title,
+        event.currency,
+        event.country,
+        event.impact,
+        event.scheduledAt,
+        event.forecast,
+        event.previous,
+        event.actual,
+        event.sourceUrl,
+        JSON.stringify(event.rawPayload || {}),
+      ]
+    );
+    return { row: updated.rows[0], created: false, timeChanged };
+  }
+
+  const inserted = await pool.query(
+    `
+    INSERT INTO discord_news_events
+      (provider, provider_event_key, title, currency, country, impact, scheduled_at, forecast, previous, actual, source_url, raw_payload)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+    RETURNING *
+    `,
+    [
+      event.provider,
+      providerEventKey,
+      event.title,
+      event.currency,
+      event.country,
+      event.impact,
+      event.scheduledAt,
+      event.forecast,
+      event.previous,
+      event.actual,
+      event.sourceUrl,
+      JSON.stringify(event.rawPayload || {}),
+    ]
+  );
+  await logActivity({
+    type: 'news',
+    action: 'event_created',
+    source: 'bot',
+    entityType: 'discord_news_event',
+    entityId: String(inserted.rows[0].id),
+    metadata: { title: event.title, currency: event.currency, impact: event.impact, scheduledAt: event.scheduledAt },
+  });
+  return { row: inserted.rows[0], created: true, timeChanged: false };
+}
+
+async function scheduleNewsAlertsForEvent(eventRow, settings) {
+  if (!settings.destinationChannelId) return 0;
+  const event = serializeNewsEvent(eventRow);
+  if (!newsEventPassesFilters({ ...event, scheduledAt: new Date(event.scheduledAt) }, settings)) return 0;
+  const config = alertConfigForImpact(event.impact, settings);
+  if (!config || !config.enabled) return 0;
+  const scheduledFor = new Date(new Date(event.scheduledAt).getTime() - Number(config.minutesBefore || 0) * 60 * 1000);
+  if (scheduledFor.getTime() < Date.now() - NEWS_STALE_ALERT_GRACE_MINUTES * 60 * 1000) return 0;
+  const result = await pool.query(
+    `
+    INSERT INTO discord_news_alerts
+      (news_event_id, alert_type, scheduled_for, destination_channel_id, mention_everyone, template_id, status, metadata)
+    VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7::jsonb)
+    ON CONFLICT DO NOTHING
+    RETURNING id
+    `,
+    [
+      event.id,
+      config.alertType,
+      scheduledFor,
+      settings.destinationChannelId,
+      Boolean(config.mentionEveryone),
+      config.templateId || null,
+      JSON.stringify({ minutesBefore: config.minutesBefore }),
+    ]
+  );
+  if (result.rowCount) {
+    await logActivity({
+      type: 'news',
+      action: 'alert_scheduled',
+      source: 'bot',
+      entityType: 'discord_news_alert',
+      entityId: String(result.rows[0].id),
+      metadata: { eventId: event.id, alertType: config.alertType, scheduledFor, mentionEveryone: Boolean(config.mentionEveryone) },
+    });
+  }
+  return result.rowCount;
+}
+
+function localDateKey(date, timezone = 'Europe/London') {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+    const value = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    return `${value.year}-${value.month}-${value.day}`;
+  } catch (_) {
+    return date.toISOString().slice(0, 10);
+  }
+}
+
+function dailySummaryScheduledAt(dayDate, time, timezone = 'Europe/London') {
+  const [hour, minute] = String(time || '07:00').split(':').map(Number);
+  const dateKey = localDateKey(dayDate, timezone);
+  const naive = new Date(`${dateKey}T${String(hour || 0).padStart(2, '0')}:${String(minute || 0).padStart(2, '0')}:00.000Z`);
+  return naive;
+}
+
+async function scheduleDailyNewsSummaries(settings) {
+  if (!settings.dailySummaryEnabled || !settings.destinationChannelId) return 0;
+  const now = new Date();
+  const start = new Date(now);
+  start.setUTCHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 2);
+  const eventsResult = await pool.query(
+    `
+    SELECT *
+    FROM discord_news_events
+    WHERE scheduled_at >= $1 AND scheduled_at < $2 AND cancelled = false
+    ORDER BY scheduled_at ASC
+    `,
+    [start, end]
+  );
+  const days = new Set();
+  for (const row of eventsResult.rows) {
+    const event = serializeNewsEvent(row);
+    if (newsEventPassesFilters({ ...event, scheduledAt: new Date(event.scheduledAt) }, settings)) {
+      days.add(localDateKey(new Date(row.scheduled_at), settings.timezone));
+    }
+  }
+  let created = 0;
+  for (const day of days) {
+    const scheduledFor = dailySummaryScheduledAt(new Date(`${day}T12:00:00.000Z`), settings.dailySummaryTime, settings.timezone);
+    if (scheduledFor.getTime() < Date.now() - NEWS_STALE_ALERT_GRACE_MINUTES * 60 * 1000) continue;
+    const result = await pool.query(
+      `
+      INSERT INTO discord_news_alerts
+        (news_event_id, alert_type, scheduled_for, destination_channel_id, mention_everyone, template_id, status, metadata)
+      VALUES (NULL, 'DAILY_SUMMARY', $1, $2, $3, $4, 'PENDING', $5::jsonb)
+      ON CONFLICT DO NOTHING
+      RETURNING id
+      `,
+      [
+        scheduledFor,
+        settings.destinationChannelId,
+        settings.dailySummaryMentionEveryone,
+        settings.dailySummaryTemplateId || null,
+        JSON.stringify({ date: day }),
+      ]
+    );
+    created += result.rowCount;
+  }
+  return created;
+}
+
+async function syncNewsFeed({ actor = null, manual = false } = {}) {
+  if (newsSyncRunning && !manual) return { skipped: true, reason: 'already_running' };
+  newsSyncRunning = true;
+  const settings = await getNewsSettings();
+  const started = await pool.query(
+    `INSERT INTO discord_news_sync_logs (provider, status) VALUES ($1, 'RUNNING') RETURNING id`,
+    [settings.provider]
+  );
+  const logId = started.rows[0].id;
+  await logActivity({ type: 'news', action: 'feed_sync_started', actor, source: manual ? 'crm_api' : 'bot' });
+  let eventsReceived = 0;
+  let eventsCreated = 0;
+  let eventsUpdated = 0;
+  let alertsCreated = 0;
+  try {
+    const payload = await fetchNewsFeed(settings.feedUrl);
+    const events = normalizeForexFactoryPayload(payload, settings.provider);
+    eventsReceived = events.length;
+    for (const event of events) {
+      try {
+        const result = await upsertNewsEvent(event, settings);
+        if (result.created) eventsCreated += 1;
+        else eventsUpdated += 1;
+        alertsCreated += await scheduleNewsAlertsForEvent(result.row, settings);
+      } catch (error) {
+        await logActivity({ type: 'news', action: 'event_upsert_failed', source: 'bot', metadata: { title: event.title, currency: event.currency }, errorMessage: error.message });
+      }
+    }
+    alertsCreated += await scheduleDailyNewsSummaries(settings);
+    await pool.query(
+      `
+      UPDATE discord_news_sync_logs
+      SET status = 'SUCCESS',
+          completed_at = NOW(),
+          events_received = $2,
+          events_created = $3,
+          events_updated = $4,
+          alerts_created = $5
+      WHERE id = $1
+      `,
+      [logId, eventsReceived, eventsCreated, eventsUpdated, alertsCreated]
+    );
+    await logActivity({ type: 'news', action: 'feed_sync_completed', actor, source: manual ? 'crm_api' : 'bot', metadata: { eventsReceived, eventsCreated, eventsUpdated, alertsCreated } });
+    return { eventsReceived, eventsCreated, eventsUpdated, alertsCreated };
+  } catch (error) {
+    await pool.query(
+      `
+      UPDATE discord_news_sync_logs
+      SET status = 'FAILED', completed_at = NOW(), error_code = $2, error_message = $3
+      WHERE id = $1
+      `,
+      [logId, error.code || 'NEWS_SYNC_FAILED', sanitizePublicErrorMessage(error)]
+    );
+    await logActivity({ type: 'news', action: 'feed_sync_failed', actor, source: manual ? 'crm_api' : 'bot', errorMessage: sanitizePublicErrorMessage(error) });
+    if (manual) throw error;
+    return { failed: true, error: sanitizePublicErrorMessage(error) };
+  } finally {
+    newsSyncRunning = false;
+  }
+}
+
+function buildNewsEmbed(templateRow, event, settings, extra = {}) {
+  const values = newsTemplateValues(event, settings, extra);
+  const title = renderNewsTemplateString(templateRow.title_template, values).slice(0, 256);
+  const body = renderNewsTemplateString(templateRow.body_template, values).slice(0, 4096);
+  const embed = new EmbedBuilder()
+    .setColor(parseColor(templateRow.colour, BRAND_COLOR))
+    .setTitle(title || BRAND_NAME)
+    .setDescription(body)
+    .setFooter({ text: String(templateRow.footer_text || BRAND_FOOTER).slice(0, 2048), iconURL: LOGO_URL })
+    .setTimestamp();
+  if (templateRow.image_url) embed.setImage(validateUrl(templateRow.image_url, 'News template image URL'));
+  if (templateRow.thumbnail_url) embed.setThumbnail(validateUrl(templateRow.thumbnail_url, 'News template thumbnail URL'));
+  return embed;
+}
+
+async function eventsForDailySummary(day, settings) {
+  const start = new Date(`${day}T00:00:00.000Z`);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 1);
+  const result = await pool.query(
+    `
+    SELECT *
+    FROM discord_news_events
+    WHERE scheduled_at >= $1 AND scheduled_at < $2 AND cancelled = false
+    ORDER BY scheduled_at ASC
+    `,
+    [start, end]
+  );
+  return result.rows
+    .map(serializeNewsEvent)
+    .filter(event => newsEventPassesFilters({ ...event, scheduledAt: new Date(event.scheduledAt) }, settings));
+}
+
+function buildDailyEventList(events) {
+  if (!events.length) return 'No selected economic events are currently stored for this date.';
+  return events.map(event => {
+    const scheduled = new Date(event.scheduledAt);
+    const unix = Math.floor(scheduled.getTime() / 1000);
+    const icon = event.impact === 'HIGH' ? '🔴' : event.impact === 'MEDIUM' ? '🟠' : event.impact === 'LOW' ? '🟡' : '⚪';
+    return `${icon} **${event.currency} — ${event.title}** · <t:${unix}:t> · ${event.impact}`;
+  }).join('\n');
+}
+
+async function validateNewsChannel(channelId, mentionEveryone = false) {
+  const channel = await fetchTextChannel(channelId);
+  const permissions = client.user ? channel.permissionsFor(client.user) : null;
+  if (permissions && !permissions.has(PermissionFlagsBits.EmbedLinks)) {
+    throw createApiError('NEWS_CHANNEL_EMBED_PERMISSION_MISSING', 'Bot cannot embed links in this channel', 403);
+  }
+  const canMentionEveryone = !permissions || permissions.has(PermissionFlagsBits.MentionEveryone);
+  const canAddReactions = !permissions || permissions.has(PermissionFlagsBits.AddReactions);
+  return { channel, canMentionEveryone, canAddReactions, mentionEveryone: mentionEveryone && canMentionEveryone };
+}
+
+async function sendNewsAlert(alertRow, { test = false } = {}) {
+  const settings = await getNewsSettings();
+  const alert = alertRow;
+  const isDaily = alert.alert_type === 'DAILY_SUMMARY';
+  const event = isDaily
+    ? null
+    : (await pool.query(`SELECT * FROM discord_news_events WHERE id = $1`, [alert.news_event_id])).rows[0];
+  const template = await getNewsTemplateForAlert(alert.alert_type, settings, alert.template_id);
+  if (!template) throw createApiError('NEWS_TEMPLATE_MISSING', `No enabled template found for ${alert.alert_type}`, 400);
+  const destinationChannelId = alert.destination_channel_id || settings.destinationChannelId;
+  if (!destinationChannelId) throw createApiError('NEWS_CHANNEL_MISSING', 'News destination channel is not configured', 400);
+  const channelCheck = await validateNewsChannel(destinationChannelId, alert.mention_everyone);
+  if (alert.mention_everyone && !channelCheck.canMentionEveryone) {
+    await logActivity({
+      type: 'news',
+      action: 'missing_mention_permission',
+      source: test ? 'crm_api' : 'bot',
+      entityType: 'discord_news_alert',
+      entityId: String(alert.id || 'test'),
+      metadata: { channelId: destinationChannelId },
+      errorMessage: 'Bot lacks Mention Everyone permission; posted without @everyone.',
+    });
+  }
+  let embed;
+  let reactions = sanitizeReactions(template.reactions, settings.defaultReactions);
+  if (isDaily) {
+    const day = alert.metadata?.date || localDateKey(new Date(alert.scheduled_for), settings.timezone);
+    const events = await eventsForDailySummary(day, settings);
+    const valuesEvent = { title: 'Daily Summary', currency: '', impact: 'SUMMARY', scheduled_at: alert.scheduled_for, scheduledAt: alert.scheduled_for };
+    embed = buildNewsEmbed(template, valuesEvent, settings, {
+      eventList: buildDailyEventList(events),
+      eventCount: events.length,
+      date: day,
+    });
+  } else {
+    const minutesBefore = alert.metadata?.minutesBefore ?? Math.max(0, Math.round((new Date(event.scheduled_at).getTime() - new Date(alert.scheduled_for).getTime()) / 60000));
+    embed = buildNewsEmbed(template, event, settings, { minutesBefore });
+  }
+  const components = buildButtonRows(template.buttons || []);
+  const message = await channelCheck.channel.send({
+    content: channelCheck.mentionEveryone ? '@everyone' : '',
+    embeds: [embed],
+    components,
+    allowedMentions: channelCheck.mentionEveryone ? { parse: ['everyone'] } : { parse: [] },
+  });
+  if (channelCheck.canAddReactions) await addReactions(message, reactions);
+  else await logActivity({ type: 'news', action: 'missing_reaction_permission', source: test ? 'crm_api' : 'bot', metadata: { channelId: destinationChannelId } });
+  return { messageId: message.id, channelId: destinationChannelId, mentionEveryone: channelCheck.mentionEveryone };
+}
+
+async function pollDueNewsAlerts() {
+  if (newsAlertPollRunning) return;
+  newsAlertPollRunning = true;
+  try {
+    await pool.query(
+      `
+      UPDATE discord_news_alerts
+      SET status = 'SKIPPED', last_error = 'Alert missed stale grace period.', updated_at = NOW()
+      WHERE status = 'PENDING' AND scheduled_for < NOW() - ($1::text || ' minutes')::interval
+      `,
+      [NEWS_STALE_ALERT_GRACE_MINUTES]
+    );
+    for (let i = 0; i < 5; i += 1) {
+      const result = await pool.query(
+        `
+        UPDATE discord_news_alerts
+        SET status = 'PROCESSING', attempt_count = attempt_count + 1, updated_at = NOW()
+        WHERE id = (
+          SELECT id
+          FROM discord_news_alerts
+          WHERE status = 'PENDING' AND scheduled_for <= NOW()
+          ORDER BY scheduled_for ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        )
+        RETURNING *
+        `
+      );
+      if (!result.rowCount) break;
+      const alert = result.rows[0];
+      try {
+        const sendResult = await sendNewsAlert(alert);
+        await pool.query(
+          `
+          UPDATE discord_news_alerts
+          SET status = 'SENT', discord_message_id = $2, sent_at = NOW(), last_error = NULL, updated_at = NOW()
+          WHERE id = $1
+          `,
+          [alert.id, sendResult.messageId]
+        );
+        await logActivity({ type: 'news', action: 'alert_sent', source: 'bot', entityType: 'discord_news_alert', entityId: String(alert.id), metadata: sendResult });
+      } catch (error) {
+        await pool.query(
+          `
+          UPDATE discord_news_alerts
+          SET status = 'FAILED', last_error = $2, updated_at = NOW()
+          WHERE id = $1
+          `,
+          [alert.id, sanitizePublicErrorMessage(error)]
+        );
+        await logActivity({ type: 'news', action: 'alert_failed', source: 'bot', entityType: 'discord_news_alert', entityId: String(alert.id), errorMessage: sanitizePublicErrorMessage(error) });
+      }
+    }
+  } finally {
+    newsAlertPollRunning = false;
+  }
+}
+
+async function startNewsSchedulers() {
+  if (newsRefreshIntervalHandle) clearInterval(newsRefreshIntervalHandle);
+  if (newsAlertIntervalHandle) clearInterval(newsAlertIntervalHandle);
+  const settings = await getNewsSettings();
+  if (settings.enabled) {
+    syncNewsFeed().catch(error => console.log(`Initial news sync failed: ${error.message}`));
+  }
+  newsRefreshIntervalHandle = setInterval(async () => {
+    const current = await getNewsSettings().catch(() => settings);
+    if (current.enabled) await syncNewsFeed().catch(error => console.log(`Scheduled news sync failed: ${error.message}`));
+  }, Math.max(5, Number(settings.refreshIntervalMinutes || 15)) * 60 * 1000);
+  newsAlertIntervalHandle = setInterval(() => {
+    pollDueNewsAlerts().catch(error => console.log(`News alert poll failed: ${error.message}`));
+  }, NEWS_ALERT_POLL_MS);
+}
+
+async function getNewsOverview() {
+  const settings = await getNewsSettings();
+  const [
+    lastSuccess,
+    lastFailed,
+    upcoming,
+    pending,
+    sentToday,
+    failedToday,
+    nextAlert,
+    dailyLastSent,
+    byImpact,
+  ] = await Promise.all([
+    pool.query(`SELECT * FROM discord_news_sync_logs WHERE status = 'SUCCESS' ORDER BY completed_at DESC NULLS LAST, started_at DESC LIMIT 1`),
+    pool.query(`SELECT * FROM discord_news_sync_logs WHERE status = 'FAILED' ORDER BY completed_at DESC NULLS LAST, started_at DESC LIMIT 1`),
+    pool.query(`SELECT COUNT(*)::int AS count FROM discord_news_events WHERE scheduled_at >= NOW() AND cancelled = false`),
+    pool.query(`SELECT COUNT(*)::int AS count FROM discord_news_alerts WHERE status = 'PENDING'`),
+    pool.query(`SELECT COUNT(*)::int AS count FROM discord_news_alerts WHERE status = 'SENT' AND sent_at >= date_trunc('day', NOW())`),
+    pool.query(`SELECT COUNT(*)::int AS count FROM discord_news_alerts WHERE status = 'FAILED' AND updated_at >= date_trunc('day', NOW())`),
+    pool.query(`SELECT * FROM discord_news_alerts WHERE status = 'PENDING' ORDER BY scheduled_for ASC LIMIT 1`),
+    pool.query(`SELECT * FROM discord_news_alerts WHERE alert_type = 'DAILY_SUMMARY' AND status = 'SENT' ORDER BY sent_at DESC LIMIT 1`),
+    pool.query(`SELECT alert_type, COUNT(*)::int AS count FROM discord_news_alerts WHERE status = 'SENT' GROUP BY alert_type`),
+  ]);
+  return {
+    automationEnabled: settings.enabled,
+    feedStatus: lastFailed.rowCount && (!lastSuccess.rowCount || new Date(lastFailed.rows[0].started_at) > new Date(lastSuccess.rows[0].started_at)) ? 'failed' : 'ok',
+    lastSuccessfulSync: lastSuccess.rows[0]?.completed_at || null,
+    lastError: lastFailed.rows[0]?.error_message || null,
+    upcomingStoredEvents: upcoming.rows[0]?.count || 0,
+    pendingAlerts: pending.rows[0]?.count || 0,
+    alertsSentToday: sentToday.rows[0]?.count || 0,
+    alertsFailedToday: failedToday.rows[0]?.count || 0,
+    dailySummaryLastSent: dailyLastSent.rows[0]?.sent_at || null,
+    highImpactAlertsSent: byImpact.rows.find(row => row.alert_type === 'HIGH_IMPACT_ADVANCE')?.count || 0,
+    mediumImpactAlertsSent: byImpact.rows.find(row => row.alert_type === 'MEDIUM_IMPACT_ADVANCE')?.count || 0,
+    lowImpactAlertsSent: byImpact.rows.find(row => row.alert_type === 'LOW_IMPACT_ADVANCE')?.count || 0,
+    destinationChannelId: settings.destinationChannelId,
+    nextScheduledAlert: nextAlert.rows[0] ? serializeNewsAlert(nextAlert.rows[0]) : null,
   };
 }
 
@@ -2414,6 +3753,10 @@ client.once('clientReady', async () => {
       youtubeIntervalHandle = setInterval(checkYoutubeFeed, settings.pollingIntervalMs);
     }
   }, POLLING_INTERVAL_MS);
+
+  await startNewsSchedulers().catch(error => {
+    console.log(`News scheduler startup failed: ${error.message}`);
+  });
 });
 
 client.on('guildMemberAdd', async member => {
@@ -4305,6 +5648,326 @@ function startCRMStatsServer() {
     apiSuccess(res, { deleted: result.rowCount > 0 }, { extra: { deleted: result.rowCount > 0 } });
   }));
 
+  router.get('/news/overview', asyncRoute(async (req, res) => {
+    const overview = await getNewsOverview();
+    apiSuccess(res, overview, { extra: { overview } });
+  }));
+
+  router.get('/news/settings', asyncRoute(async (req, res) => {
+    const [settings, overview] = await Promise.all([getNewsSettings(), getNewsOverview()]);
+    apiSuccess(res, { ...settings, ...overview }, { extra: { settings, overview } });
+  }));
+
+  router.patch('/news/settings', asyncRoute(async (req, res) => {
+    const patch = sanitizeNewsSettingsPatch(req.body || {});
+    const settings = await updateNewsSettings(patch, getActor(req));
+    await logActivity({ type: 'news', action: 'settings_changed', actor: getActor(req), source: 'crm_api', metadata: { keys: Object.keys(patch) } });
+    await startNewsSchedulers();
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.post('/news/settings/test-feed', asyncRoute(async (req, res) => {
+    const settings = await getNewsSettings();
+    const feedUrl = req.body.feedUrl || settings.feedUrl;
+    const payload = await fetchNewsFeed(feedUrl, { retries: 0 });
+    const events = normalizeForexFactoryPayload(payload, settings.provider);
+    await logActivity({ type: 'news', action: 'feed_tested', actor: getActor(req), source: 'crm_api', metadata: { eventsReceived: events.length } });
+    apiSuccess(res, { ok: true, eventsReceived: events.length, sample: events.slice(0, 5) });
+  }));
+
+  router.post('/news/settings/test-channel', asyncRoute(async (req, res) => {
+    const settings = await getNewsSettings();
+    const channelId = req.body.channelId || settings.destinationChannelId;
+    if (!channelId) throw createApiError('NEWS_CHANNEL_MISSING', 'News destination channel is not configured', 400);
+    const check = await validateNewsChannel(requireDiscordId(channelId, 'News channel ID'), toBoolean(req.body.mentionEveryone, false));
+    const result = {
+      channelId: check.channel.id,
+      channelName: check.channel.name,
+      canMentionEveryone: check.canMentionEveryone,
+      canAddReactions: check.canAddReactions,
+      willMentionEveryone: check.mentionEveryone,
+    };
+    await logActivity({ type: 'news', action: 'channel_tested', actor: getActor(req), source: 'crm_api', metadata: result });
+    apiSuccess(res, result);
+  }));
+
+  router.post('/news/settings/send-test-alert', asyncRoute(async (req, res) => {
+    const settings = await getNewsSettings();
+    const upcoming = await pool.query(
+      `SELECT * FROM discord_news_events WHERE scheduled_at >= NOW() ORDER BY scheduled_at ASC LIMIT 1`
+    );
+    const event = upcoming.rows[0] || {
+      id: null,
+      title: req.body.title || 'Test Economic Event',
+      currency: req.body.currency || 'USD',
+      country: req.body.country || 'United States',
+      impact: normalizeNewsImpact(req.body.impact || 'HIGH'),
+      scheduled_at: new Date(Date.now() + 15 * 60 * 1000),
+      forecast: req.body.forecast || 'N/A',
+      previous: req.body.previous || 'N/A',
+      actual: null,
+      source_url: null,
+    };
+    const alert = {
+      id: 'test',
+      news_event_id: event.id,
+      alert_type: req.body.alertType || NEWS_ADVANCE_ALERT_TYPES[event.impact] || 'HIGH_IMPACT_ADVANCE',
+      scheduled_for: new Date(),
+      destination_channel_id: req.body.channelId || settings.destinationChannelId,
+      mention_everyone: toBoolean(req.body.mentionEveryone, false),
+      template_id: req.body.templateId || null,
+      metadata: { minutesBefore: req.body.minutesBefore || 15, date: localDateKey(new Date(), settings.timezone) },
+    };
+    const template = await getNewsTemplateForAlert(alert.alert_type, settings, alert.template_id);
+    if (!template) throw createApiError('NEWS_TEMPLATE_MISSING', `No enabled template found for ${alert.alert_type}`, 400);
+    if (!event.id) {
+      const values = newsTemplateValues(event, settings, { minutesBefore: alert.metadata.minutesBefore });
+      const embed = buildNewsEmbed(template, event, settings, { minutesBefore: alert.metadata.minutesBefore });
+      const channel = await validateNewsChannel(alert.destination_channel_id, alert.mention_everyone);
+      const message = await channel.channel.send({
+        content: channel.mentionEveryone ? '@everyone' : '',
+        embeds: [embed],
+        components: buildButtonRows(template.buttons || []),
+        allowedMentions: channel.mentionEveryone ? { parse: ['everyone'] } : { parse: [] },
+      });
+      await addReactions(message, sanitizeReactions(template.reactions, settings.defaultReactions));
+      await logActivity({ type: 'news', action: 'test_alert_sent', actor: getActor(req), source: 'crm_api', metadata: { channelId: alert.destination_channel_id, messageId: message.id, title: values.title } });
+      apiSuccess(res, { sent: true, messageId: message.id, channelId: alert.destination_channel_id });
+      return;
+    }
+    const sent = await sendNewsAlert(alert, { test: true });
+    await logActivity({ type: 'news', action: 'test_alert_sent', actor: getActor(req), source: 'crm_api', metadata: sent });
+    apiSuccess(res, { sent: true, ...sent });
+  }));
+
+  router.get('/news/templates', asyncRoute(async (req, res) => {
+    const page = parsePositiveInt(req.query.page, 1);
+    const limit = parsePositiveInt(req.query.limit || req.query.pageSize, 100, 200);
+    const offset = (page - 1) * limit;
+    const [result, count] = await Promise.all([
+      pool.query(`SELECT * FROM discord_news_templates ORDER BY template_type ASC, updated_at DESC LIMIT $1 OFFSET $2`, [limit, offset]),
+      pool.query(`SELECT COUNT(*)::int AS count FROM discord_news_templates`),
+    ]);
+    const templates = result.rows.map(serializeNewsTemplate);
+    apiSuccess(res, templates, { page, pageSize: limit, total: count.rows[0]?.count || 0, extra: { templates, variableHelpers: NEWS_TEMPLATE_VARIABLES } });
+  }));
+
+  router.post('/news/templates', asyncRoute(async (req, res) => {
+    const payload = sanitizeNewsTemplatePayload(req.body);
+    const result = await pool.query(
+      `
+      INSERT INTO discord_news_templates
+        (name, template_type, enabled, title_template, body_template, colour, image_url, thumbnail_url, footer_text, buttons, reactions, updated_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12)
+      RETURNING *
+      `,
+      [payload.name, payload.templateType, payload.enabled, payload.titleTemplate, payload.bodyTemplate, payload.colour, payload.imageUrl, payload.thumbnailUrl, payload.footerText, JSON.stringify(payload.buttons), JSON.stringify(payload.reactions), getActor(req)]
+    );
+    await logActivity({ type: 'news_template', action: 'created', actor: getActor(req), source: 'crm_api', entityType: 'discord_news_template', entityId: String(result.rows[0].id) });
+    const template = serializeNewsTemplate(result.rows[0]);
+    apiSuccess(res, template, { status: 201, extra: { template } });
+  }));
+
+  router.get('/news/templates/:id', asyncRoute(async (req, res) => {
+    const result = await pool.query(`SELECT * FROM discord_news_templates WHERE id = $1`, [req.params.id]);
+    if (!result.rowCount) throw createApiError('NEWS_TEMPLATE_NOT_FOUND', 'News template not found', 404);
+    const template = serializeNewsTemplate(result.rows[0]);
+    apiSuccess(res, template, { extra: { template } });
+  }));
+
+  router.patch('/news/templates/:id', asyncRoute(async (req, res) => {
+    const current = await pool.query(`SELECT * FROM discord_news_templates WHERE id = $1`, [req.params.id]);
+    if (!current.rowCount) throw createApiError('NEWS_TEMPLATE_NOT_FOUND', 'News template not found', 404);
+    const payload = sanitizeNewsTemplatePayload(req.body, current.rows[0]);
+    const result = await pool.query(
+      `
+      UPDATE discord_news_templates
+      SET name = $2,
+          template_type = $3,
+          enabled = $4,
+          title_template = $5,
+          body_template = $6,
+          colour = $7,
+          image_url = $8,
+          thumbnail_url = $9,
+          footer_text = $10,
+          buttons = $11::jsonb,
+          reactions = $12::jsonb,
+          updated_by = $13,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [req.params.id, payload.name, payload.templateType, payload.enabled, payload.titleTemplate, payload.bodyTemplate, payload.colour, payload.imageUrl, payload.thumbnailUrl, payload.footerText, JSON.stringify(payload.buttons), JSON.stringify(payload.reactions), getActor(req)]
+    );
+    await logActivity({ type: 'news_template', action: 'updated', actor: getActor(req), source: 'crm_api', entityType: 'discord_news_template', entityId: String(req.params.id) });
+    const template = serializeNewsTemplate(result.rows[0]);
+    apiSuccess(res, template, { extra: { template } });
+  }));
+
+  router.delete('/news/templates/:id', asyncRoute(async (req, res) => {
+    const assigned = await pool.query(
+      `
+      SELECT 1 FROM discord_news_settings
+      WHERE high_impact_template_id = $1
+         OR medium_impact_template_id = $1
+         OR low_impact_template_id = $1
+         OR daily_summary_template_id = $1
+         OR event_time_template_id = $1
+      LIMIT 1
+      `,
+      [req.params.id]
+    );
+    if (assigned.rowCount && req.query.force !== 'true') {
+      throw createApiError('NEWS_TEMPLATE_ASSIGNED', 'Template is actively assigned. Reassign it or pass force=true.', 409);
+    }
+    const result = await pool.query(`DELETE FROM discord_news_templates WHERE id = $1`, [req.params.id]);
+    await logActivity({ type: 'news_template', action: 'deleted', actor: getActor(req), source: 'crm_api', entityType: 'discord_news_template', entityId: String(req.params.id) });
+    apiSuccess(res, { deleted: result.rowCount > 0 });
+  }));
+
+  router.post('/news/templates/:id/preview', asyncRoute(async (req, res) => {
+    const result = await pool.query(`SELECT * FROM discord_news_templates WHERE id = $1`, [req.params.id]);
+    if (!result.rowCount) throw createApiError('NEWS_TEMPLATE_NOT_FOUND', 'News template not found', 404);
+    const settings = await getNewsSettings();
+    const sampleEvent = {
+      title: req.body.title || 'US CPI y/y',
+      currency: req.body.currency || 'USD',
+      country: req.body.country || 'United States',
+      impact: req.body.impact || 'HIGH',
+      scheduledAt: new Date(Date.now() + 15 * 60 * 1000),
+      forecast: req.body.forecast || '3.1%',
+      previous: req.body.previous || '3.0%',
+      actual: req.body.actual || null,
+      sourceUrl: DEFAULT_NEWS_FEED_URL,
+    };
+    const values = newsTemplateValues(sampleEvent, settings, { minutesBefore: req.body.minutesBefore || 15, eventList: buildDailyEventList([sampleEvent]), eventCount: 1 });
+    apiSuccess(res, {
+      title: renderNewsTemplateString(result.rows[0].title_template, values),
+      body: renderNewsTemplateString(result.rows[0].body_template, values),
+      values,
+      template: serializeNewsTemplate(result.rows[0]),
+    });
+  }));
+
+  router.post('/news/templates/:id/test-send', asyncRoute(async (req, res) => {
+    req.body.templateId = req.params.id;
+    req.body.alertType = req.body.alertType || null;
+    const template = await pool.query(`SELECT template_type FROM discord_news_templates WHERE id = $1`, [req.params.id]);
+    if (!template.rowCount) throw createApiError('NEWS_TEMPLATE_NOT_FOUND', 'News template not found', 404);
+    req.body.alertType = req.body.alertType || template.rows[0].template_type;
+    const settings = await getNewsSettings();
+    const event = {
+      id: null,
+      title: req.body.title || 'Test Economic Event',
+      currency: req.body.currency || 'USD',
+      country: req.body.country || 'United States',
+      impact: normalizeNewsImpact(req.body.impact || 'HIGH'),
+      scheduled_at: new Date(Date.now() + 15 * 60 * 1000),
+      forecast: req.body.forecast || 'N/A',
+      previous: req.body.previous || 'N/A',
+      actual: null,
+      source_url: null,
+    };
+    const channel = await validateNewsChannel(req.body.channelId || settings.destinationChannelId, toBoolean(req.body.mentionEveryone, false));
+    const embed = buildNewsEmbed((await pool.query(`SELECT * FROM discord_news_templates WHERE id = $1`, [req.params.id])).rows[0], event, settings, { minutesBefore: req.body.minutesBefore || 15 });
+    const message = await channel.channel.send({ content: channel.mentionEveryone ? '@everyone' : '', embeds: [embed], allowedMentions: channel.mentionEveryone ? { parse: ['everyone'] } : { parse: [] } });
+    apiSuccess(res, { sent: true, messageId: message.id, channelId: channel.channel.id });
+  }));
+
+  router.post('/news/events/sync', asyncRoute(async (req, res) => {
+    const result = await syncNewsFeed({ actor: getActor(req), manual: true });
+    apiSuccess(res, result, { extra: { result } });
+  }));
+
+  router.get('/news/events', asyncRoute(async (req, res) => {
+    const page = parsePositiveInt(req.query.page, 1);
+    const limit = parsePositiveInt(req.query.limit || req.query.pageSize, 50, 200);
+    const params = [];
+    const where = [];
+    if (req.query.currency) { params.push(String(req.query.currency).toUpperCase()); where.push(`currency = $${params.length}`); }
+    if (req.query.impact) { params.push(normalizeNewsImpact(req.query.impact)); where.push(`impact = $${params.length}`); }
+    if (req.query.search) { params.push(`%${String(req.query.search).trim()}%`); where.push(`title ILIKE $${params.length}`); }
+    if (req.query.from) { params.push(new Date(String(req.query.from))); where.push(`scheduled_at >= $${params.length}`); }
+    if (req.query.to) { params.push(new Date(String(req.query.to))); where.push(`scheduled_at <= $${params.length}`); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    params.push(limit, (page - 1) * limit);
+    const result = await pool.query(`SELECT * FROM discord_news_events ${whereSql} ORDER BY scheduled_at ASC LIMIT $${params.length - 1} OFFSET $${params.length}`, params);
+    const count = await pool.query(`SELECT COUNT(*)::int AS count FROM discord_news_events ${whereSql}`, params.slice(0, -2));
+    const events = result.rows.map(serializeNewsEvent);
+    apiSuccess(res, events, { page, pageSize: limit, total: count.rows[0]?.count || 0, extra: { events } });
+  }));
+
+  router.get('/news/events/:id', asyncRoute(async (req, res) => {
+    const result = await pool.query(`SELECT * FROM discord_news_events WHERE id = $1`, [req.params.id]);
+    if (!result.rowCount) throw createApiError('NEWS_EVENT_NOT_FOUND', 'News event not found', 404);
+    const alerts = await pool.query(`SELECT * FROM discord_news_alerts WHERE news_event_id = $1 ORDER BY scheduled_for ASC`, [req.params.id]);
+    apiSuccess(res, { event: serializeNewsEvent(result.rows[0]), alerts: alerts.rows.map(serializeNewsAlert) });
+  }));
+
+  router.get('/news/alerts', asyncRoute(async (req, res) => {
+    const page = parsePositiveInt(req.query.page, 1);
+    const limit = parsePositiveInt(req.query.limit || req.query.pageSize, 50, 200);
+    const params = [];
+    const where = [];
+    if (req.query.status) { params.push(String(req.query.status).toUpperCase()); where.push(`a.status = $${params.length}`); }
+    if (req.query.impact) { params.push(normalizeNewsImpact(req.query.impact)); where.push(`e.impact = $${params.length}`); }
+    if (req.query.currency) { params.push(String(req.query.currency).toUpperCase()); where.push(`e.currency = $${params.length}`); }
+    if (req.query.search) { params.push(`%${String(req.query.search).trim()}%`); where.push(`e.title ILIKE $${params.length}`); }
+    if (req.query.from) { params.push(new Date(String(req.query.from))); where.push(`a.scheduled_for >= $${params.length}`); }
+    if (req.query.to) { params.push(new Date(String(req.query.to))); where.push(`a.scheduled_for <= $${params.length}`); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    params.push(limit, (page - 1) * limit);
+    const result = await pool.query(
+      `
+      SELECT a.*, e.title, e.provider, e.provider_event_key, e.currency, e.country, e.impact, e.scheduled_at, e.forecast, e.previous, e.actual, e.source_url, e.first_seen_at, e.last_seen_at, e.cancelled
+      FROM discord_news_alerts a
+      LEFT JOIN discord_news_events e ON e.id = a.news_event_id
+      ${whereSql}
+      ORDER BY a.scheduled_for DESC
+      LIMIT $${params.length - 1} OFFSET $${params.length}
+      `,
+      params
+    );
+    const count = await pool.query(`SELECT COUNT(*)::int AS count FROM discord_news_alerts a LEFT JOIN discord_news_events e ON e.id = a.news_event_id ${whereSql}`, params.slice(0, -2));
+    const alerts = result.rows.map(serializeNewsAlert);
+    apiSuccess(res, alerts, { page, pageSize: limit, total: count.rows[0]?.count || 0, extra: { alerts } });
+  }));
+
+  router.get('/news/alerts/:id', asyncRoute(async (req, res) => {
+    const result = await pool.query(
+      `
+      SELECT a.*, e.title, e.provider, e.provider_event_key, e.currency, e.country, e.impact, e.scheduled_at, e.forecast, e.previous, e.actual, e.source_url, e.first_seen_at, e.last_seen_at, e.cancelled
+      FROM discord_news_alerts a
+      LEFT JOIN discord_news_events e ON e.id = a.news_event_id
+      WHERE a.id = $1
+      `,
+      [req.params.id]
+    );
+    if (!result.rowCount) throw createApiError('NEWS_ALERT_NOT_FOUND', 'News alert not found', 404);
+    apiSuccess(res, serializeNewsAlert(result.rows[0]));
+  }));
+
+  router.post('/news/alerts/:id/retry', asyncRoute(async (req, res) => {
+    const result = await pool.query(
+      `UPDATE discord_news_alerts SET status = 'PENDING', scheduled_for = NOW(), last_error = NULL, updated_at = NOW() WHERE id = $1 AND status IN ('FAILED', 'SKIPPED', 'CANCELLED') RETURNING *`,
+      [req.params.id]
+    );
+    if (!result.rowCount) throw createApiError('NEWS_ALERT_RETRY_UNAVAILABLE', 'Only failed, skipped or cancelled alerts can be retried', 400);
+    await logActivity({ type: 'news', action: 'alert_retry_requested', actor: getActor(req), source: 'crm_api', entityType: 'discord_news_alert', entityId: String(req.params.id) });
+    apiSuccess(res, serializeNewsAlert(result.rows[0]));
+  }));
+
+  router.post('/news/alerts/:id/cancel', asyncRoute(async (req, res) => {
+    const result = await pool.query(
+      `UPDATE discord_news_alerts SET status = 'CANCELLED', last_error = 'Cancelled by CRM admin', updated_at = NOW() WHERE id = $1 AND status IN ('PENDING', 'FAILED') RETURNING *`,
+      [req.params.id]
+    );
+    if (!result.rowCount) throw createApiError('NEWS_ALERT_CANCEL_UNAVAILABLE', 'Only pending or failed alerts can be cancelled', 400);
+    await logActivity({ type: 'news', action: 'alert_cancelled', actor: getActor(req), source: 'crm_api', entityType: 'discord_news_alert', entityId: String(req.params.id) });
+    apiSuccess(res, serializeNewsAlert(result.rows[0]));
+  }));
+
   router.get('/activity', asyncRoute(async (req, res) => {
     const result = await pool.query(
       `
@@ -4349,9 +6012,32 @@ function startCRMStatsServer() {
     console.log(`CRM stats API listening on port ${port}`);
   });
 }
-(async () => {
+async function startBot() {
   await initDB();
   startCRMStatsServer();
   await registerCommands();
   await client.login(DISCORD_TOKEN);
-})();
+}
+
+if (require.main === module) {
+  startBot().catch(error => {
+    console.error('Bot startup failed:', error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  normalizeNewsImpact,
+  normalizeForexFactoryEvent,
+  normalizeForexFactoryPayload,
+  stableNewsEventKey,
+  validateNewsFeedUrl,
+  newsEventPassesFilters,
+  renderNewsTemplateString,
+  newsTemplateValues,
+  buildAllowedMentions,
+  DEFAULT_NEWS_SETTINGS,
+  DEFAULT_NEWS_FEED_URL,
+  DEFAULT_NEWS_TEMPLATES,
+  localDateKey,
+};
