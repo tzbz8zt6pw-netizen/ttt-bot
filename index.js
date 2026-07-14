@@ -1610,9 +1610,10 @@ function buildPayloadEmbed(payload) {
 }
 
 function buildMessageOptionsFromPayload(payload) {
-  const components = payload.components || buildButtonRows(
-    payload.buttons?.length ? payload.buttons : [{ label: 'Visit Website', url: WEBSITE_URL }]
-  );
+  const hasExplicitComponents = Object.prototype.hasOwnProperty.call(payload, 'components');
+  const components = hasExplicitComponents
+    ? (Array.isArray(payload.components) ? payload.components : [])
+    : buildButtonRows(payload.buttons?.length ? payload.buttons : [{ label: 'Visit Website', url: WEBSITE_URL }]);
 
   return {
     content: payload.pingEveryone ? '@everyone' : (payload.content || ''),
@@ -1753,6 +1754,13 @@ async function sendToChannelId(channelId, payload, reactions = []) {
 
 async function editOrCreateManagedMessage({ channelId, messageId, payload, reactions }) {
   const channel = await fetchTextChannel(channelId);
+  const permissions = client.user ? channel.permissionsFor(client.user) : null;
+  if (permissions && !permissions.has(PermissionFlagsBits.EmbedLinks)) {
+    const error = new Error('Bot cannot publish embeds in this channel. Enable Embed Links for the bot role.');
+    error.status = 403;
+    error.code = 'MISSING_EMBED_LINKS_PERMISSION';
+    throw error;
+  }
   const messageOptions = buildMessageOptionsFromPayload(payload);
   let message = null;
 
@@ -1773,6 +1781,25 @@ async function editOrCreateManagedMessage({ channelId, messageId, payload, react
 
   await addReactions(message, sanitizeReactions(reactions, DEFAULT_MANAGED_REACTIONS));
   return message;
+}
+
+function managedPublishDiagnostics({ managedPost, payload, targetChannelId, targetMessageId, description, buttons }) {
+  const contentBlocks = sanitizeManagedBlocks(payload.contentBlocks || []);
+  return {
+    managedPostId: managedPost.id,
+    internalName: payload.internalName || managedPost.internal_name || null,
+    targetChannelId,
+    targetMessageId: targetMessageId || null,
+    savedChannelId: managedPost.channel_id || null,
+    savedMessageId: managedPost.message_id || null,
+    hasTitle: Boolean(payload.title || managedPost.internal_name),
+    descriptionLength: String(description || '').length,
+    fieldCount: Array.isArray(payload.fields) ? payload.fields.length : 0,
+    bottomButtonCount: buttons.length,
+    blockCount: contentBlocks.length,
+    blockLinkCount: contentBlocks.reduce((sum, block) => sum + (block.buttons?.length || 0), 0),
+    reactionCount: sanitizeReactions(payload.reactions || DEFAULT_MANAGED_REACTIONS).length,
+  };
 }
 
 const commands = [
@@ -2464,13 +2491,22 @@ function sendApiError(error, req, res, next) {
     metadata: { method: req.method, path: req.path },
     errorMessage: error.message,
   }).catch(() => {});
-  res.status(error.status || 500).json({
+  const status = error.status || error.httpStatus || (error.code ? 400 : 500);
+  res.status(status).json({
     ok: false,
     error: {
-      code: error.code || (error.status ? 'BAD_REQUEST' : 'SERVER_ERROR'),
-      message: error.status ? error.message : 'Server error',
+      code: error.code || (status < 500 ? 'BAD_REQUEST' : 'SERVER_ERROR'),
+      message: sanitizePublicErrorMessage(error),
+      details: error.details || undefined,
     },
   });
+}
+
+function sanitizePublicErrorMessage(error) {
+  const message = String(error?.message || '').trim();
+  if (!message) return 'Server error';
+  if (/token|secret|authorization|bearer|password/i.test(message)) return 'Server error';
+  return message.slice(0, 500);
 }
 
 function requireDiscordId(value, label = 'Discord user ID') {
@@ -4071,6 +4107,38 @@ function startCRMStatsServer() {
     apiSuccess(res, managedPost, { extra: { managedPost } });
   }));
 
+  router.get('/managed-posts/:id/publish-diagnostics', asyncRoute(async (req, res) => {
+    const result = await pool.query(`SELECT * FROM discord_managed_posts WHERE id = $1`, [req.params.id]);
+    if (!result.rowCount) throw createApiError('MANAGED_POST_NOT_FOUND', 'Managed post not found', 404);
+    const managedPost = result.rows[0];
+    const payload = managedPost.payload || {};
+    const targetChannelId = payload.channelId || managedPost.channel_id;
+    const targetMessageId = targetChannelId === managedPost.channel_id ? managedPost.message_id : null;
+    const description = managedDescriptionFromPayload(payload);
+    const buttons = managedButtonsFromPayload(payload);
+    const diagnostics = managedPublishDiagnostics({ managedPost, payload, targetChannelId, targetMessageId, description, buttons });
+
+    try {
+      const channel = await fetchTextChannel(targetChannelId);
+      diagnostics.channel = {
+        id: channel.id,
+        name: channel.name || null,
+        type: channel.type,
+        canView: Boolean(channel.permissionsFor(client.user)?.has(PermissionFlagsBits.ViewChannel)),
+        canSend: Boolean(channel.permissionsFor(client.user)?.has(PermissionFlagsBits.SendMessages)),
+        canEmbed: Boolean(channel.permissionsFor(client.user)?.has(PermissionFlagsBits.EmbedLinks)),
+        canAddReactions: Boolean(channel.permissionsFor(client.user)?.has(PermissionFlagsBits.AddReactions)),
+      };
+      diagnostics.ok = true;
+    } catch (error) {
+      diagnostics.ok = false;
+      diagnostics.error = sanitizePublicErrorMessage(error);
+      diagnostics.errorCode = error.code || null;
+    }
+
+    apiSuccess(res, diagnostics, { extra: { diagnostics } });
+  }));
+
   router.patch('/managed-posts/:id', asyncRoute(async (req, res) => {
     const current = await pool.query(`SELECT * FROM discord_managed_posts WHERE id = $1`, [req.params.id]);
     if (!current.rowCount) throw createApiError('MANAGED_POST_NOT_FOUND', 'Managed post not found', 404);
@@ -4131,6 +4199,7 @@ function startCRMStatsServer() {
       : null;
     const description = managedDescriptionFromPayload(payload);
     const buttons = managedButtonsFromPayload(payload);
+    const diagnostics = managedPublishDiagnostics({ managedPost, payload, targetChannelId, targetMessageId, description, buttons });
 
     try {
       const message = await editOrCreateManagedMessage({
@@ -4178,14 +4247,28 @@ function startCRMStatsServer() {
           payload.displayOrder || managedPost.display_order || 0,
         ]
       );
-      await logActivity({ type: 'managed_post', action: 'published', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(req.params.id), metadata: { messageId: message.id } });
+      await logActivity({ type: 'managed_post', action: 'published', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(req.params.id), metadata: { messageId: message.id, channelId: targetChannelId, diagnostics } });
       const updated = serializeManagedPost(updateResult.rows[0]);
       apiSuccess(res, updated, { extra: { managedPost: updated } });
     } catch (error) {
+      const publicMessage = sanitizePublicErrorMessage(error);
       await pool.query(
         `UPDATE discord_managed_posts SET status = 'error', last_error = $2, updated_at = NOW() WHERE id = $1`,
-        [req.params.id, error.message]
+        [req.params.id, publicMessage]
       );
+      await logActivity({
+        type: 'managed_post',
+        action: 'publish_failed',
+        actor: getActor(req),
+        source: 'crm_api',
+        entityType: 'managed_post',
+        entityId: String(req.params.id),
+        metadata: { ...diagnostics, errorCode: error.code || null, errorName: error.name || null },
+        errorMessage: publicMessage,
+      });
+      error.status = error.status || error.httpStatus || 400;
+      error.code = error.code || 'MANAGED_POST_PUBLISH_FAILED';
+      error.details = diagnostics;
       throw error;
     }
   }));
