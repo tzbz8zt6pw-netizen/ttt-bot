@@ -1455,6 +1455,8 @@ async function listSubscribers({ page = 1, limit = 50, search = '', includeUsers
       SELECT user_id, created_at, status, unsubscribed_at, username, display_name, avatar_url
       FROM subscribers
       WHERE user_id ILIKE $1
+         OR username ILIKE $1
+         OR display_name ILIKE $1
       ORDER BY created_at DESC
       LIMIT $2 OFFSET $3
       `
@@ -1466,7 +1468,7 @@ async function listSubscribers({ page = 1, limit = 50, search = '', includeUsers
       `;
 
   const countQuery = search
-    ? `SELECT COUNT(*)::int AS count FROM subscribers WHERE user_id ILIKE $1`
+    ? `SELECT COUNT(*)::int AS count FROM subscribers WHERE user_id ILIKE $1 OR username ILIKE $1 OR display_name ILIKE $1`
     : `SELECT COUNT(*)::int AS count FROM subscribers`;
 
   const [rowsResult, countResult] = await Promise.all([
@@ -4202,6 +4204,15 @@ function startCRMStatsServer() {
     const diagnostics = managedPublishDiagnostics({ managedPost, payload, targetChannelId, targetMessageId, description, buttons });
 
     try {
+      await logActivity({
+        type: 'managed_post',
+        action: 'publish_attempt',
+        actor: getActor(req),
+        source: 'crm_api',
+        entityType: 'managed_post',
+        entityId: String(req.params.id),
+        metadata: diagnostics,
+      });
       const message = await editOrCreateManagedMessage({
         channelId: targetChannelId,
         messageId: targetMessageId,
@@ -4277,11 +4288,14 @@ function startCRMStatsServer() {
     const result = await pool.query(`SELECT * FROM discord_managed_posts WHERE id = $1`, [req.params.id]);
     if (!result.rowCount) throw createApiError('MANAGED_POST_NOT_FOUND', 'Managed post not found', 404);
     const managedPost = result.rows[0];
-    if (!managedPost.message_id) throw createApiError('MANAGED_POST_UNPUBLISHED', 'Managed post has no Discord message ID', 400);
-    const channel = await fetchTextChannel(managedPost.channel_id);
-    const message = await channel.messages.fetch(managedPost.message_id);
+    const messageId = managedPost.message_id || managedPost.payload?.messageId || managedPost.payload?.message_id || null;
+    const channelId = managedPost.channel_id || managedPost.payload?.channelId || null;
+    if (!messageId) throw createApiError('MANAGED_POST_UNPUBLISHED', 'Managed page has not published a Discord message yet. Click Publish first, then sync reactions.', 400);
+    if (!channelId) throw createApiError('MANAGED_POST_CHANNEL_MISSING', 'Managed page has no Discord channel selected.', 400);
+    const channel = await fetchTextChannel(channelId);
+    const message = await channel.messages.fetch(messageId);
     await addReactions(message, sanitizeReactions(managedPost.payload?.reactions, DEFAULT_MANAGED_REACTIONS).slice(0, 10));
-    await logActivity({ type: 'managed_post', action: 'reaction_sync', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(req.params.id) });
+    await logActivity({ type: 'managed_post', action: 'reaction_sync', actor: getActor(req), source: 'crm_api', entityType: 'managed_post', entityId: String(req.params.id), metadata: { messageId, channelId } });
     apiSuccess(res, { synced: true }, { extra: { synced: true } });
   }));
 
