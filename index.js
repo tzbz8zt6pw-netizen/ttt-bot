@@ -384,20 +384,8 @@ const PAYOUT_NAME_POOL = [
   'Ines', 'Ravi', 'Luca', 'Grace', 'Yusuf', 'Hana', 'Ben', 'Lina', 'Arjun', 'Mia',
 ];
 const PAYOUT_INITIALS = 'ABCDEFGHJKLMNPRSTVWYZ'.split('');
-const DEFAULT_PAYOUT_TEMPLATES = [
-  'A TTT Trader from {{flag}} {{display_name}} just secured a {{formatted_amount}} reward! 💰',
-  'A TTT Trader from {{flag}} just secured a {{formatted_amount}} reward! 💰',
-  '{{flag}} {{display_name}} just secured a {{formatted_amount}} reward! 💸',
-  'Another TTT Trader from {{flag}} has secured {{formatted_amount}}! 💰',
-  'Reward secured ✅ {{flag}} {{display_name}} received {{formatted_amount}}.',
-  'A trader from {{flag}} just locked in a {{formatted_amount}} reward! 💸',
-  'Another reward update — {{flag}} {{display_name}} secured {{formatted_amount}}! 💰',
-  '{{formatted_amount}} secured by a TTT Trader from {{flag}}! 🚀',
-  'A TTT Trader from {{flag}} has just received {{formatted_amount}}! 💰',
-  'Fresh reward update: {{flag}} {{display_name}} secured {{formatted_amount}}.',
-  'Another trader rewarded ✅ {{flag}} {{display_name}} received {{formatted_amount}}.',
-  '{{flag}} A TTT Trader just secured a {{formatted_amount}} reward! 💸',
-];
+const DEFAULT_PAYOUT_MESSAGE_TEMPLATE = 'An TTT Trader from {{flag_code}} just secured a {{reward_amount}} reward! :moneybag:';
+const DEFAULT_PAYOUT_TEMPLATES = [DEFAULT_PAYOUT_MESSAGE_TEMPLATE];
 let payoutFeedIntervalHandle = null;
 let payoutFeedPollRunning = false;
 
@@ -925,6 +913,23 @@ async function initDB() {
   await pool.query(`ALTER TABLE discord_payout_feed_items ADD COLUMN IF NOT EXISTS week_id BIGINT REFERENCES discord_payout_feed_weeks(id) ON DELETE SET NULL;`);
   await pool.query(`CREATE INDEX IF NOT EXISTS discord_payout_feed_items_due_idx ON discord_payout_feed_items (status, scheduled_for);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS discord_payout_feed_items_week_idx ON discord_payout_feed_items (week_id, status);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_certificate_feed_settings (
+      id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+      pass_channel_id TEXT,
+      payout_channel_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_by TEXT
+    );
+  `);
+
+  await pool.query(`
+    INSERT INTO discord_certificate_feed_settings (id)
+    VALUES (1)
+    ON CONFLICT (id) DO NOTHING
+  `);
 
   await pool.query(
     `
@@ -2808,6 +2813,11 @@ function flagFromCountryCode(countryCode) {
   return code.replace(/./g, char => String.fromCodePoint(127397 + char.charCodeAt(0)));
 }
 
+function discordFlagCode(countryCode) {
+  const code = String(countryCode || '').trim().toLowerCase();
+  return /^[a-z]{2}$/.test(code) ? `:flag_${code}:` : ':earth_africa:';
+}
+
 function payoutCountryName(countryCode) {
   const code = String(countryCode || '').trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(code)) return 'Unknown';
@@ -2832,6 +2842,60 @@ function formatPayoutAmount(amount, currency = 'USD') {
   } catch (_) {
     return `${safeCurrency} ${value.toFixed(value % 1 === 0 ? 0 : 2)}`;
   }
+}
+
+function formatPayoutRewardAmount(amount, currency = 'USD') {
+  const value = Number(amount || 0);
+  const symbolMap = { USD: '$', GBP: '£', EUR: '€' };
+  const safeCurrency = String(currency || 'USD').toUpperCase();
+  const symbol = symbolMap[safeCurrency] || `${safeCurrency} `;
+  return `${symbol}${value.toFixed(3)}`;
+}
+
+function payoutTemplateValues(row = {}) {
+  const countryCode = String(row.country_code || row.countryCode || 'GB').trim().toUpperCase();
+  const currency = String(row.currency || 'USD').trim().toUpperCase();
+  const amount = Number(row.amount || 0);
+  return {
+    flag: row.flag || flagFromCountryCode(countryCode),
+    flag_code: discordFlagCode(countryCode),
+    display_name: row.display_name || row.displayName || 'TTT Trader',
+    formatted_amount: formatPayoutAmount(amount, currency),
+    reward_amount: formatPayoutRewardAmount(amount, currency),
+    amount,
+    currency,
+    country_code: countryCode,
+    country_name: row.country_name || row.countryName || payoutCountryName(countryCode),
+  };
+}
+
+function renderUniformPayoutMessage(row = {}) {
+  return renderPayoutTemplate(DEFAULT_PAYOUT_MESSAGE_TEMPLATE, payoutTemplateValues(row));
+}
+
+function normalizeCountryCode(value, fallback = 'GB') {
+  const code = String(value || fallback || 'GB').trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(code) ? code : 'GB';
+}
+
+function sanitizeLivePayoutPayload(body = {}) {
+  const amount = Number(body.amount ?? body.rewardAmount ?? body.payoutAmount);
+  if (!Number.isFinite(amount) || amount <= 0) throw createApiError('LIVE_PAYOUT_AMOUNT_REQUIRED', 'Live payout amount must be greater than zero.', 400);
+  const countryCode = normalizeCountryCode(body.countryCode || body.country_code || body.country || 'GB');
+  const currency = /^[A-Z]{3}$/.test(String(body.currency || 'USD').toUpperCase()) ? String(body.currency || 'USD').toUpperCase() : 'USD';
+  const externalPayoutId = String(body.externalPayoutId || body.external_payout_id || body.payoutId || body.id || `live_${Date.now()}`).trim();
+  return {
+    externalPayoutId,
+    firstName: String(body.firstName || body.first_name || '').trim() || null,
+    lastName: String(body.lastName || body.last_name || '').trim() || null,
+    displayName: String(body.displayName || body.display_name || '').trim() || 'TTT Trader',
+    countryCode,
+    countryName: String(body.countryName || body.country_name || payoutCountryName(countryCode)).trim(),
+    flag: discordFlagCode(countryCode),
+    amount,
+    currency,
+    scheduledFor: body.scheduledFor || body.scheduled_for ? new Date(String(body.scheduledFor || body.scheduled_for)) : new Date(),
+  };
 }
 
 function renderPayoutTemplate(template, values = {}) {
@@ -2950,6 +3014,7 @@ function generatePayoutWeekPlanPure(settings = {}, options = {}) {
     const template = templates[templateIndex];
     const values = {
       flag: flagFromCountryCode(countryCode),
+      flag_code: discordFlagCode(countryCode),
       country_code: countryCode,
       country_name: payoutCountryName(countryCode),
       first_name: firstName,
@@ -2957,6 +3022,7 @@ function generatePayoutWeekPlanPure(settings = {}, options = {}) {
       amount,
       currency,
       formatted_amount: formatPayoutAmount(amount, currency),
+      reward_amount: formatPayoutRewardAmount(amount, currency),
     };
     return {
       sourceType: 'SIMULATION',
@@ -2973,7 +3039,7 @@ function generatePayoutWeekPlanPure(settings = {}, options = {}) {
       scheduledFor,
       templateId: template.id || null,
       templateName: template.name || null,
-      message: renderPayoutTemplate(template.bodyTemplate || template.body_template || template, values),
+      message: renderUniformPayoutMessage(values),
     };
   });
 
@@ -3189,15 +3255,7 @@ function serializePayoutItem(row) {
     weekId: row.week_id,
     attemptCount: Number(row.attempt_count || 0),
     lastError: row.last_error,
-    message: row.body_template ? renderPayoutTemplate(row.body_template, {
-      flag: row.flag,
-      display_name: row.display_name,
-      formatted_amount: formatPayoutAmount(row.amount, row.currency),
-      country_code: row.country_code,
-      country_name: row.country_name,
-      amount: row.amount,
-      currency: row.currency,
-    }) : null,
+    message: renderUniformPayoutMessage(row),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3338,17 +3396,7 @@ async function sendPayoutFeedItem(row, { test = false, channelId = null } = {}) 
   const settings = await getPayoutFeedSettings();
   const destinationChannelId = channelId || settings.destinationChannelId;
   if (!destinationChannelId) throw createApiError('PAYOUT_CHANNEL_MISSING', 'Payout destination channel is not configured', 400);
-  const templateRow = row.body_template ? row : (await pool.query(`SELECT * FROM discord_payout_feed_templates WHERE id = $1`, [row.template_id])).rows[0];
-  const values = {
-    flag: row.flag || flagFromCountryCode(row.country_code),
-    display_name: row.display_name || 'TTT Trader',
-    formatted_amount: formatPayoutAmount(row.amount, row.currency),
-    amount: row.amount,
-    currency: row.currency,
-    country_code: row.country_code,
-    country_name: row.country_name,
-  };
-  const content = renderPayoutTemplate(templateRow?.body_template || DEFAULT_PAYOUT_TEMPLATES[0], values).slice(0, 1800);
+  const content = renderUniformPayoutMessage(row).slice(0, 1800);
   const channel = await fetchTextChannel(destinationChannelId);
   const permissions = channel.permissionsFor(client.user);
   if (permissions && !permissions.has(PermissionFlagsBits.SendMessages)) {
@@ -3380,6 +3428,90 @@ async function refreshPayoutWeekCounts(weekId) {
     `,
     [weekId, counts.rows[0]?.generated || 0, counts.rows[0]?.scheduled || 0, counts.rows[0]?.posted || 0, counts.rows[0]?.failed || 0]
   );
+}
+
+async function getCertificateFeedSettings() {
+  const result = await pool.query(`SELECT * FROM discord_certificate_feed_settings WHERE id = 1`);
+  if (!result.rowCount) {
+    await pool.query(`INSERT INTO discord_certificate_feed_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+    return { passChannelId: null, payoutChannelId: null };
+  }
+  return {
+    passChannelId: result.rows[0].pass_channel_id || null,
+    payoutChannelId: result.rows[0].payout_channel_id || null,
+    updatedAt: result.rows[0].updated_at,
+    updatedBy: result.rows[0].updated_by || null,
+  };
+}
+
+async function updateCertificateFeedSettings(body = {}, actor = null) {
+  const passChannelId = Object.prototype.hasOwnProperty.call(body, 'passChannelId') || Object.prototype.hasOwnProperty.call(body, 'pass_channel_id')
+    ? (body.passChannelId || body.pass_channel_id || null)
+    : undefined;
+  const payoutChannelId = Object.prototype.hasOwnProperty.call(body, 'payoutChannelId') || Object.prototype.hasOwnProperty.call(body, 'payout_channel_id')
+    ? (body.payoutChannelId || body.payout_channel_id || null)
+    : undefined;
+  const current = await getCertificateFeedSettings();
+  const nextPass = passChannelId === undefined ? current.passChannelId : passChannelId ? requireDiscordId(passChannelId, 'Pass certificate channel ID') : null;
+  const nextPayout = payoutChannelId === undefined ? current.payoutChannelId : payoutChannelId ? requireDiscordId(payoutChannelId, 'Payout certificate channel ID') : null;
+  const result = await pool.query(
+    `
+    UPDATE discord_certificate_feed_settings
+    SET pass_channel_id = $1, payout_channel_id = $2, updated_at = NOW(), updated_by = $3
+    WHERE id = 1
+    RETURNING *
+    `,
+    [nextPass, nextPayout, actor]
+  );
+  return {
+    passChannelId: result.rows[0].pass_channel_id || null,
+    payoutChannelId: result.rows[0].payout_channel_id || null,
+    updatedAt: result.rows[0].updated_at,
+    updatedBy: result.rows[0].updated_by || null,
+  };
+}
+
+function certificatePayload(body = {}, type = 'pass') {
+  const certificateUrl = String(body.certificateUrl || body.certificate_url || body.url || body.link || '').trim();
+  if (!/^https?:\/\//i.test(certificateUrl)) throw createApiError('CERTIFICATE_URL_REQUIRED', 'Certificate URL must be a public HTTP or HTTPS link.', 400);
+  const name = String(body.name || body.traderName || body.trader_name || body.customerName || 'TTT Trader').trim();
+  const account = String(body.account || body.accountNumber || body.account_number || body.login || '').trim();
+  const amount = body.amount || body.rewardAmount || body.payoutAmount;
+  const countryCode = normalizeCountryCode(body.countryCode || body.country_code || body.country || 'GB');
+  return {
+    type,
+    name,
+    account,
+    certificateUrl,
+    amount: amount === undefined || amount === null || amount === '' ? null : Number(amount),
+    currency: String(body.currency || 'USD').toUpperCase(),
+    countryCode,
+    flagCode: discordFlagCode(countryCode),
+  };
+}
+
+function renderCertificateMessage(payload) {
+  if (payload.type === 'payout') {
+    const amount = payload.amount ? ` ${formatPayoutRewardAmount(payload.amount, payload.currency)}` : '';
+    return `${payload.flagCode} Payout certificate issued for ${payload.name}${amount}. ${payload.certificateUrl}`;
+  }
+  return `${payload.flagCode} Challenge pass certificate issued for ${payload.name}${payload.account ? ` (${payload.account})` : ''}. ${payload.certificateUrl}`;
+}
+
+async function postCertificatePayload(type, body = {}) {
+  const settings = await getCertificateFeedSettings();
+  const payload = certificatePayload(body, type);
+  const channelId = body.channelId || body.channel_id || (type === 'payout' ? settings.payoutChannelId : settings.passChannelId);
+  if (!channelId) throw createApiError('CERTIFICATE_CHANNEL_MISSING', `${type === 'payout' ? 'Payout' : 'Pass'} certificate channel is not configured.`, 400);
+  const channel = await fetchTextChannel(requireDiscordId(channelId, 'Certificate channel ID'));
+  const permissions = channel.permissionsFor(client.user);
+  if (permissions && !permissions.has(PermissionFlagsBits.SendMessages)) {
+    throw createApiError('CERTIFICATE_CHANNEL_NO_SEND_PERMISSION', 'Bot cannot send messages in the certificate channel.', 403);
+  }
+  const content = renderCertificateMessage(payload).slice(0, 1800);
+  const message = await channel.send({ content, allowedMentions: { parse: [] } });
+  await logActivity({ type: 'certificate_feed', action: `${type}_certificate_posted`, source: 'crm_api', metadata: { channelId: channel.id, messageId: message.id, certificateUrl: payload.certificateUrl } });
+  return { sent: true, messageId: message.id, channelId: channel.id, content, payload };
 }
 
 async function pollDuePayoutFeedItems() {
@@ -6652,6 +6784,72 @@ function startCRMStatsServer() {
     apiSuccess(res, { sent: true, ...sent });
   }));
 
+  router.post('/payout-feed/live', asyncRoute(async (req, res) => {
+    const live = sanitizeLivePayoutPayload(req.body || {});
+    const result = await pool.query(
+      `
+      INSERT INTO discord_payout_feed_items
+        (source_type, is_simulated, external_payout_id, first_name, last_name, display_name, country_code, country_name, flag, amount, currency, status, scheduled_for)
+      VALUES ('LIVE', false, $1, $2, $3, $4, $5, $6, $7, $8, $9, 'SCHEDULED', $10)
+      ON CONFLICT (external_payout_id) DO UPDATE
+      SET first_name = EXCLUDED.first_name,
+          last_name = EXCLUDED.last_name,
+          display_name = EXCLUDED.display_name,
+          country_code = EXCLUDED.country_code,
+          country_name = EXCLUDED.country_name,
+          flag = EXCLUDED.flag,
+          amount = EXCLUDED.amount,
+          currency = EXCLUDED.currency,
+          updated_at = NOW()
+      RETURNING *
+      `,
+      [
+        live.externalPayoutId,
+        live.firstName,
+        live.lastName,
+        live.displayName,
+        live.countryCode,
+        live.countryName,
+        live.flag,
+        live.amount,
+        live.currency,
+        live.scheduledFor,
+      ]
+    );
+    let sent = null;
+    if (toBoolean(req.body.postNow ?? req.body.post_now, true)) {
+      sent = await sendPayoutFeedItem(result.rows[0], { channelId: req.body.channelId || req.body.channel_id || null });
+      await pool.query(
+        `UPDATE discord_payout_feed_items SET status = 'POSTED', discord_message_id = $2, posted_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = $1`,
+        [result.rows[0].id, sent.messageId]
+      );
+    }
+    await logActivity({ type: 'payout_feed', action: 'live_payout_received', actor: getActor(req), source: 'crm_api', entityType: 'discord_payout_feed_item', entityId: String(result.rows[0].id), metadata: { externalPayoutId: live.externalPayoutId, posted: Boolean(sent) } });
+    const refreshed = await pool.query(`SELECT i.*, NULL::text AS body_template FROM discord_payout_feed_items i WHERE i.id = $1`, [result.rows[0].id]);
+    apiSuccess(res, serializePayoutItem(refreshed.rows[0]), { status: 201, extra: { item: serializePayoutItem(refreshed.rows[0]), sent } });
+  }));
+
+  router.get('/certificates/settings', asyncRoute(async (req, res) => {
+    const settings = await getCertificateFeedSettings();
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.patch('/certificates/settings', asyncRoute(async (req, res) => {
+    const settings = await updateCertificateFeedSettings(req.body || {}, getActor(req));
+    await logActivity({ type: 'certificate_feed', action: 'settings_changed', actor: getActor(req), source: 'crm_api', metadata: { keys: Object.keys(req.body || {}) } });
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.post('/certificates/pass', asyncRoute(async (req, res) => {
+    const result = await postCertificatePayload('pass', req.body || {});
+    apiSuccess(res, result, { status: 201, extra: result });
+  }));
+
+  router.post('/certificates/payout', asyncRoute(async (req, res) => {
+    const result = await postCertificatePayload('payout', req.body || {});
+    apiSuccess(res, result, { status: 201, extra: result });
+  }));
+
   router.get('/payout-feed/weeks/current', asyncRoute(async (req, res) => {
     const settings = await getPayoutFeedSettings();
     const { weekStart } = localWeekRange(new Date(), settings.timezone);
@@ -7252,8 +7450,11 @@ module.exports = {
   localDateKey,
   generatePayoutWeekPlanPure,
   formatPayoutAmount,
+  formatPayoutRewardAmount,
   flagFromCountryCode,
+  discordFlagCode,
   renderPayoutTemplate,
+  renderUniformPayoutMessage,
   normalizePayoutSettings,
   localDateParts,
   DEFAULT_PAYOUT_SETTINGS,
