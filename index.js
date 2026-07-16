@@ -5994,15 +5994,17 @@ function getActor(req) {
 }
 
 function normalizeAnnouncementPayload(body) {
+  const splitList = (value) => Array.isArray(value)
+    ? value
+    : String(value || '').split(/[\s,]+/).map(row => row.trim()).filter(Boolean);
   const channelIds = Array.isArray(body.channelIds)
     ? body.channelIds.map(id => normalizeDiscordId(id)).filter(Boolean)
     : [];
-  const mappedChannelKeys = Array.isArray(body.mappedChannels)
-    ? body.mappedChannels.filter(key => CHANNEL_MAPPING_KEYS.includes(key))
-    : [];
-  const selectedSubscriberIds = Array.isArray(body.selectedSubscriberIds)
-    ? body.selectedSubscriberIds.map(id => normalizeDiscordId(id)).filter(Boolean)
-    : [];
+  const mappedChannelKeys = splitList(body.mappedChannels || body.mappedChannelGroups || body.mappedChannelKeys)
+    .filter(key => CHANNEL_MAPPING_KEYS.includes(key));
+  const selectedSubscriberIds = splitList(body.selectedSubscriberIds)
+    .map(id => normalizeDiscordId(id))
+    .filter(Boolean);
   const payload = {
     title: String(body.title || '').trim(),
     message: String(body.message || body.description || '').trim(),
@@ -6010,7 +6012,7 @@ function normalizeAnnouncementPayload(body) {
     thumbnail: body.thumbnail || null,
     channelIds,
     mappedChannelKeys,
-    sendDm: toBoolean(body.sendToSubscribersByDm ?? body.sendDm, false),
+    sendDm: toBoolean(body.sendToSubscribersByDm ?? body.sendSubscriberDms ?? body.sendDm, false),
     selectedSubscriberIds,
     pingEveryone: toBoolean(body.pingEveryone, false),
     buttons: sanitizeButtons(body.buttons || []),
@@ -6088,6 +6090,10 @@ async function sendAnnouncementById(id, req) {
   const channelIds = Array.from(new Set([...(payload.channelIds || []), ...mappedChannelIds]));
   const embed = buildPayloadEmbed(payload);
   const buttonRows = buildButtonRows(payload.buttons || []);
+  const timeline = [
+    { label: 'Announcement loaded', status: 'completed', detail: `Announcement ${id}` },
+    { label: 'Destinations resolved', status: 'completed', detail: `${channelIds.length} channel(s), ${payload.sendDm ? 'subscriber DMs enabled' : 'subscriber DMs disabled'}` },
+  ];
 
   try {
     let campaign = null;
@@ -6095,6 +6101,7 @@ async function sendAnnouncementById(id, req) {
       const recipientIds = payload.selectedSubscriberIds?.length
         ? payload.selectedSubscriberIds
         : await getSubscriberIds();
+      timeline.push({ label: 'Subscriber recipients resolved', status: 'completed', detail: `${recipientIds.length} subscriber(s)` });
       campaign = await createDmCampaign({
         name: `Announcement ${id}`,
         announcementId: id,
@@ -6103,6 +6110,7 @@ async function sendAnnouncementById(id, req) {
         actor: req ? getActor(req) : null,
       });
       startDmCampaign(campaign.id);
+      timeline.push({ label: 'Subscriber DM campaign queued', status: 'queued', detail: `Campaign ${campaign.id} queued for ${campaign.total_count} subscriber(s)` });
     }
 
     const result = await runBroadcast({
@@ -6118,14 +6126,32 @@ async function sendAnnouncementById(id, req) {
       status: campaign.status,
       totalCount: campaign.total_count,
     } : null;
+    timeline.push({
+      label: 'Channel posting complete',
+      status: result.channelResult.failedCount ? (result.channelResult.postedCount ? 'partial' : 'failed') : 'completed',
+      detail: `${result.channelResult.postedCount} posted, ${result.channelResult.failedCount} failed`,
+      posts: result.channelResult.posts,
+    });
+    result.timeline = timeline;
+    result.summary = {
+      channelCount: channelIds.length,
+      postedCount: result.channelResult.postedCount,
+      failedCount: result.channelResult.failedCount,
+      dmCampaignId: campaign?.id || null,
+      dmRecipientCount: campaign?.total_count || 0,
+    };
 
     await pool.query(
       `
       UPDATE discord_announcements
-      SET status = $2, sent_at = NOW(), updated_at = NOW(), last_error = NULL
+      SET status = $2, sent_at = NOW(), updated_at = NOW(), last_error = $3
       WHERE id = $1
       `,
-      [id, campaign ? 'QUEUED' : 'COMPLETED']
+      [
+        id,
+        result.channelResult.failedCount ? (result.channelResult.postedCount || campaign ? 'PARTIAL' : 'FAILED') : (campaign ? 'QUEUED' : 'COMPLETED'),
+        result.channelResult.failedCount ? `${result.channelResult.failedCount} channel post(s) failed` : null,
+      ]
     );
 
     await logActivity({
@@ -6140,6 +6166,7 @@ async function sendAnnouncementById(id, req) {
 
     return result;
   } catch (error) {
+    timeline.push({ label: 'Announcement failed', status: 'failed', detail: error.message });
     await pool.query(
       `
       UPDATE discord_announcements
@@ -6157,6 +6184,7 @@ async function sendAnnouncementById(id, req) {
       entityId: String(id),
       errorMessage: error.message,
     });
+    error.details = { timeline };
     throw error;
   }
 }
@@ -6197,13 +6225,18 @@ async function createAnnouncement(body, req) {
   });
 
   let sendResult = null;
+  const timeline = [
+    { label: 'Announcement saved', status: 'completed', detail: `Announcement ${id} saved as ${status}` },
+  ];
   if (payload.sendImmediately && !payload.saveAsDraft) {
     sendResult = await sendAnnouncementById(id, req);
+    timeline.push(...(sendResult.timeline || []));
   }
 
   return {
     announcement: await getAnnouncement(id),
     sendResult,
+    timeline,
   };
 }
 
