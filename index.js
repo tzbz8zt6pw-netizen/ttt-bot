@@ -92,6 +92,10 @@ const SECRET_DEFINITIONS = {
   YOUTUBE_API_KEY: { label: 'YouTube API key', requiresRestart: false },
   CRM_SHARED_SECRET: { label: 'CRM shared secret', requiresRestart: true },
   INTERNAL_WEBHOOK_SECRET: { label: 'Internal webhook secret', requiresRestart: false },
+  ZEALY_API_KEY: { label: 'Zealy API key', requiresRestart: false },
+  ZEALY_COMMUNITY_SUBDOMAIN: { label: 'Zealy community subdomain', requiresRestart: false },
+  ZEALY_WEBHOOK_SECRET: { label: 'Zealy webhook secret', requiresRestart: false },
+  ZEALY_API_BASE_URL: { label: 'Zealy API base URL override', requiresRestart: false },
 };
 
 const DEFAULT_STATS = {
@@ -346,6 +350,98 @@ let newsRefreshIntervalHandle = null;
 let newsAlertIntervalHandle = null;
 let newsSyncRunning = false;
 let newsAlertPollRunning = false;
+
+let zealyLeaderboardIntervalHandle = null;
+let zealyRewardIntervalHandle = null;
+let zealyLeaderboardRunning = false;
+let zealyRewardRunning = false;
+let lastZealyLeaderboardPublishAt = 0;
+let lastZealyRewardPollAt = 0;
+const ZEALY_DEFAULT_API_BASE_URL = 'https://api-v2.zealy.io';
+const ZEALY_FETCH_TIMEOUT_MS = Number(process.env.ZEALY_FETCH_TIMEOUT_MS || 12000);
+const ZEALY_USER_AGENT = process.env.ZEALY_USER_AGENT || 'TTT-Markets-Discord-Bot/1.0 (+https://tttmarkets.com)';
+const ZEALY_TEMPLATE_VARIABLES = [
+  'zealy_name',
+  'discord_name',
+  'user_display',
+  'quest_name',
+  'quest_type',
+  'xp_delta',
+  'formatted_xp_delta',
+  'current_xp',
+  'rank',
+  'previous_rank',
+  'rank_change',
+  'reward_name',
+  'reward_name_or_default',
+  'milestone',
+  'sprint_name',
+  'community_name',
+  'discord_time',
+  'zealy_url',
+];
+const ZEALY_EVENT_TYPES = [
+  'QUEST_COMPLETED',
+  'DAILY_QUEST_COMPLETED',
+  'WEEKLY_QUEST_COMPLETED',
+  'GENERAL_QUEST_COMPLETED',
+  'XP_EARNED',
+  'XP_DEDUCTED',
+  'SHOP_REWARD_REDEMPTION',
+  'MILESTONE_REACHED',
+  'LEADERBOARD_TOP_10_ENTRY',
+  'LEADERBOARD_TOP_3_ENTRY',
+  'RANK_IMPROVEMENT',
+  'SPRINT_QUEST_COMPLETED',
+  'SPRINT_MILESTONE',
+  'NEW_MEMBER_JOINED',
+];
+const ZEALY_DEFAULT_ENABLED_EVENTS = [
+  'QUEST_COMPLETED',
+  'DAILY_QUEST_COMPLETED',
+  'WEEKLY_QUEST_COMPLETED',
+  'GENERAL_QUEST_COMPLETED',
+  'XP_EARNED',
+  'XP_DEDUCTED',
+  'SHOP_REWARD_REDEMPTION',
+  'MILESTONE_REACHED',
+  'LEADERBOARD_TOP_10_ENTRY',
+  'LEADERBOARD_TOP_3_ENTRY',
+];
+const ZEALY_DEFAULT_MILESTONES = [100, 250, 500, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 7500, 10000];
+const ZEALY_DEFAULT_SETTINGS = {
+  enabled: false,
+  leaderboardEnabled: false,
+  leaderboardChannelId: null,
+  leaderboardScope: 'ALL_TIME',
+  leaderboardLimit: 10,
+  leaderboardRefreshMinutes: 10,
+  leaderboardMessageId: null,
+  leaderboardIncludeSprint: true,
+  leaderboardShowXp: true,
+  leaderboardShowRank: true,
+  leaderboardShowDiscordNames: true,
+  leaderboardShowStats: true,
+  rewardFeedEnabled: false,
+  rewardFeedChannelId: null,
+  rewardFeedPollMinutes: 5,
+  rewardFeedEventToggles: Object.fromEntries(ZEALY_EVENT_TYPES.map(type => [type, ZEALY_DEFAULT_ENABLED_EVENTS.includes(type)])),
+  rewardFeedMilestones: ZEALY_DEFAULT_MILESTONES,
+  rewardFeedMilestoneMode: 'HIGHEST_ONLY',
+};
+const ZEALY_DEFAULT_TEMPLATES = [
+  { name: 'Quest Complete', eventType: 'QUEST_COMPLETED', titleTemplate: '🎉 Quest Complete!', bodyTemplate: '**{{user_display}}** completed:\n\n**{{quest_name}}**\n\n⭐ **+{{xp_delta}} XP**\n\nKeep climbing the TTT Markets leaderboard!' },
+  { name: 'Daily Quest Completed', eventType: 'DAILY_QUEST_COMPLETED', titleTemplate: '🔥 Daily Quest Completed', bodyTemplate: '**{{user_display}}** completed:\n\n**{{quest_name}}**\n\n⭐ **+{{xp_delta}} XP**' },
+  { name: 'Weekly Quest Completed', eventType: 'WEEKLY_QUEST_COMPLETED', titleTemplate: '🚀 Weekly Quest Completed', bodyTemplate: '**{{user_display}}** completed:\n\n**{{quest_name}}**\n\n⭐ **+{{xp_delta}} XP**' },
+  { name: 'XP Earned', eventType: 'XP_EARNED', titleTemplate: '⭐ XP Earned', bodyTemplate: '**{{user_display}}** earned **+{{xp_delta}} XP**\n\nCurrent balance: **{{current_xp}} XP**' },
+  { name: 'XP Reward Claimed', eventType: 'XP_DEDUCTED', titleTemplate: '🛒 XP Reward Claimed', bodyTemplate: '**{{user_display}}** spent **{{formatted_xp_delta}} XP**\n\n{{reward_name_or_default}}\n\nCurrent balance: **{{current_xp}} XP**' },
+  { name: 'Milestone Achieved', eventType: 'MILESTONE_REACHED', titleTemplate: '🏅 Milestone Achieved', bodyTemplate: 'Congratulations **{{user_display}}**!\n\nYou have reached **{{milestone}} XP**.' },
+  { name: 'Leaderboard Top 10', eventType: 'LEADERBOARD_TOP_10_ENTRY', titleTemplate: '📈 Leaderboard Update', bodyTemplate: '**{{user_display}}** has entered the **Top 10**!\n\nCurrent rank: **#{{rank}}**\nCurrent XP: **{{current_xp}}**' },
+  { name: 'Podium Alert', eventType: 'LEADERBOARD_TOP_3_ENTRY', titleTemplate: '🏆 Podium Alert', bodyTemplate: '**{{user_display}}** has reached **#{{rank}}** on the TTT Markets leaderboard!\n\n⭐ **{{current_xp}} XP**' },
+  { name: 'New Zealy Member', eventType: 'NEW_MEMBER_JOINED', titleTemplate: '👋 New Zealy Member', bodyTemplate: 'Welcome **{{user_display}}** to the TTT Markets rewards community!\n\nStart completing quests, earning XP and climbing the leaderboard.' },
+  { name: 'Shop Reward', eventType: 'SHOP_REWARD_REDEMPTION', titleTemplate: '🛒 Reward Claimed', bodyTemplate: '**{{user_display}}** claimed **{{reward_name}}**.\n\nXP change: **{{formatted_xp_delta}}**' },
+  { name: 'Rank Improvement', eventType: 'RANK_IMPROVEMENT', titleTemplate: '📈 Rank Improved', bodyTemplate: '**{{user_display}}** moved from **#{{previous_rank}}** to **#{{rank}}**.\n\nCurrent XP: **{{current_xp}}**' },
+];
 
 const PAYOUT_FEED_MODES = new Set(['SIMULATION', 'LIVE', 'DISABLED']);
 const PAYOUT_FEED_STATUSES = new Set(['GENERATED', 'SCHEDULED', 'PROCESSING', 'POSTED', 'FAILED', 'SKIPPED', 'CANCELLED']);
@@ -931,6 +1027,141 @@ async function initDB() {
     ON CONFLICT (id) DO NOTHING
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_zealy_settings (
+      id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+      enabled BOOLEAN NOT NULL DEFAULT false,
+      community_subdomain TEXT,
+      leaderboard_enabled BOOLEAN NOT NULL DEFAULT false,
+      leaderboard_channel_id TEXT,
+      leaderboard_scope TEXT NOT NULL DEFAULT 'ALL_TIME',
+      leaderboard_limit INTEGER NOT NULL DEFAULT 10,
+      leaderboard_refresh_minutes INTEGER NOT NULL DEFAULT 10,
+      leaderboard_message_id TEXT,
+      leaderboard_include_sprint BOOLEAN NOT NULL DEFAULT true,
+      leaderboard_show_xp BOOLEAN NOT NULL DEFAULT true,
+      leaderboard_show_rank BOOLEAN NOT NULL DEFAULT true,
+      leaderboard_show_discord_names BOOLEAN NOT NULL DEFAULT true,
+      leaderboard_show_stats BOOLEAN NOT NULL DEFAULT true,
+      reward_feed_enabled BOOLEAN NOT NULL DEFAULT false,
+      reward_feed_channel_id TEXT,
+      reward_feed_poll_minutes INTEGER NOT NULL DEFAULT 5,
+      reward_feed_event_toggles JSONB NOT NULL DEFAULT '{}'::jsonb,
+      reward_feed_milestones JSONB NOT NULL DEFAULT '[]'::jsonb,
+      reward_feed_milestone_mode TEXT NOT NULL DEFAULT 'HIGHEST_ONLY',
+      last_sync_at TIMESTAMPTZ,
+      last_webhook_at TIMESTAMPTZ,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_by TEXT
+    );
+  `);
+  await pool.query(`INSERT INTO discord_zealy_settings (id, reward_feed_event_toggles, reward_feed_milestones) VALUES (1, $1::jsonb, $2::jsonb) ON CONFLICT (id) DO NOTHING`, [JSON.stringify(ZEALY_DEFAULT_SETTINGS.rewardFeedEventToggles), JSON.stringify(ZEALY_DEFAULT_MILESTONES)]);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_zealy_members (
+      zealy_user_id TEXT PRIMARY KEY,
+      zealy_name TEXT,
+      discord_user_id TEXT,
+      discord_username TEXT,
+      xp INTEGER NOT NULL DEFAULT 0,
+      rank INTEGER,
+      sprint_xp INTEGER,
+      sprint_rank INTEGER,
+      avatar_url TEXT,
+      raw_payload JSONB,
+      first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS discord_zealy_members_discord_idx ON discord_zealy_members (discord_user_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS discord_zealy_members_rank_idx ON discord_zealy_members (rank);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_zealy_snapshots (
+      id BIGSERIAL PRIMARY KEY,
+      snapshot_type TEXT NOT NULL,
+      captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      payload_hash TEXT NOT NULL,
+      raw_payload JSONB NOT NULL,
+      member_count INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (snapshot_type, payload_hash)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_zealy_events (
+      id BIGSERIAL PRIMARY KEY,
+      provider_event_id TEXT,
+      event_type TEXT NOT NULL,
+      source TEXT NOT NULL,
+      zealy_user_id TEXT,
+      discord_user_id TEXT,
+      quest_id TEXT,
+      quest_name TEXT,
+      xp_delta INTEGER,
+      current_xp INTEGER,
+      rank_before INTEGER,
+      rank_after INTEGER,
+      reward_name TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      processed_at TIMESTAMPTZ,
+      discord_channel_id TEXT,
+      discord_message_id TEXT,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS discord_zealy_events_provider_uidx ON discord_zealy_events (provider_event_id) WHERE provider_event_id IS NOT NULL;`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS discord_zealy_events_fact_idx ON discord_zealy_events (source, event_type, zealy_user_id, occurred_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS discord_zealy_events_status_idx ON discord_zealy_events (status, occurred_at DESC);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_zealy_templates (
+      id BIGSERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      title_template TEXT NOT NULL,
+      body_template TEXT NOT NULL,
+      colour TEXT NOT NULL DEFAULT '#f35023',
+      image_url TEXT,
+      thumbnail_url TEXT,
+      footer_text TEXT,
+      buttons JSONB NOT NULL DEFAULT '[]'::jsonb,
+      reactions JSONB NOT NULL DEFAULT '[]'::jsonb,
+      is_seeded BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_by TEXT
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS discord_zealy_templates_event_idx ON discord_zealy_templates (event_type, enabled);`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_zealy_webhook_receipts (
+      id BIGSERIAL PRIMARY KEY,
+      delivery_id TEXT,
+      event_type TEXT,
+      signature_valid BOOLEAN,
+      payload_hash TEXT NOT NULL,
+      raw_payload JSONB NOT NULL,
+      received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      processed_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'RECEIVED',
+      last_error TEXT
+    );
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS discord_zealy_webhook_receipts_delivery_uidx ON discord_zealy_webhook_receipts (delivery_id) WHERE delivery_id IS NOT NULL;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS discord_zealy_webhook_receipts_payload_uidx ON discord_zealy_webhook_receipts (payload_hash);`);
+  await seedZealyTemplates();
+
   await pool.query(
     `
     INSERT INTO discord_payout_feed_settings (id, destination_channel_id)
@@ -1470,6 +1701,23 @@ function encryptSecretValue(value) {
     authTag: authTag.toString('base64'),
     lastFour: String(value).slice(-4),
   };
+}
+
+function decryptSecretValue(row) {
+  const key = getEncryptionKey();
+  if (!key || !row?.encrypted_value || !row?.iv || !row?.auth_tag || !row?.configured) return null;
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(row.iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(row.auth_tag, 'base64'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(row.encrypted_value, 'base64')),
+    decipher.final(),
+  ]).toString('utf8');
+}
+
+async function getStoredSecretValue(secretKey) {
+  const result = await pool.query(`SELECT * FROM discord_secret_settings WHERE key = $1 AND configured = true`, [secretKey]);
+  if (!result.rowCount) return process.env[secretKey] || null;
+  return decryptSecretValue(result.rows[0]) || process.env[secretKey] || null;
 }
 
 function getSecretDefinition(secretKey) {
@@ -3512,6 +3760,811 @@ async function postCertificatePayload(type, body = {}) {
   const message = await channel.send({ content, allowedMentions: { parse: [] } });
   await logActivity({ type: 'certificate_feed', action: `${type}_certificate_posted`, source: 'crm_api', metadata: { channelId: channel.id, messageId: message.id, certificateUrl: payload.certificateUrl } });
   return { sent: true, messageId: message.id, channelId: channel.id, content, payload };
+}
+
+function normalizeZealySubdomain(value) {
+  return String(value || '').trim().toLowerCase().replace(/^https?:\/\/(www\.)?zealy\.io\/cw\//i, '').replace(/[^a-z0-9_-]/g, '');
+}
+
+function normalizeZealySettings(row = {}) {
+  return {
+    ...ZEALY_DEFAULT_SETTINGS,
+    enabled: toBoolean(row.enabled, ZEALY_DEFAULT_SETTINGS.enabled),
+    communitySubdomain: normalizeZealySubdomain(row.community_subdomain || row.communitySubdomain || ''),
+    leaderboardEnabled: toBoolean(row.leaderboard_enabled ?? row.leaderboardEnabled, ZEALY_DEFAULT_SETTINGS.leaderboardEnabled),
+    leaderboardChannelId: row.leaderboard_channel_id || row.leaderboardChannelId || null,
+    leaderboardScope: String(row.leaderboard_scope || row.leaderboardScope || ZEALY_DEFAULT_SETTINGS.leaderboardScope).toUpperCase(),
+    leaderboardLimit: Math.min(25, Math.max(5, Number(row.leaderboard_limit || row.leaderboardLimit || ZEALY_DEFAULT_SETTINGS.leaderboardLimit))),
+    leaderboardRefreshMinutes: Math.max(10, Number(row.leaderboard_refresh_minutes || row.leaderboardRefreshMinutes || ZEALY_DEFAULT_SETTINGS.leaderboardRefreshMinutes)),
+    leaderboardMessageId: row.leaderboard_message_id || row.leaderboardMessageId || null,
+    leaderboardIncludeSprint: toBoolean(row.leaderboard_include_sprint ?? row.leaderboardIncludeSprint, true),
+    leaderboardShowXp: toBoolean(row.leaderboard_show_xp ?? row.leaderboardShowXp, true),
+    leaderboardShowRank: toBoolean(row.leaderboard_show_rank ?? row.leaderboardShowRank, true),
+    leaderboardShowDiscordNames: toBoolean(row.leaderboard_show_discord_names ?? row.leaderboardShowDiscordNames, true),
+    leaderboardShowStats: toBoolean(row.leaderboard_show_stats ?? row.leaderboardShowStats, true),
+    rewardFeedEnabled: toBoolean(row.reward_feed_enabled ?? row.rewardFeedEnabled, ZEALY_DEFAULT_SETTINGS.rewardFeedEnabled),
+    rewardFeedChannelId: row.reward_feed_channel_id || row.rewardFeedChannelId || null,
+    rewardFeedPollMinutes: Math.max(5, Number(row.reward_feed_poll_minutes || row.rewardFeedPollMinutes || ZEALY_DEFAULT_SETTINGS.rewardFeedPollMinutes)),
+    rewardFeedEventToggles: { ...ZEALY_DEFAULT_SETTINGS.rewardFeedEventToggles, ...(row.reward_feed_event_toggles || row.rewardFeedEventToggles || {}) },
+    rewardFeedMilestones: normalizeZealyMilestones(row.reward_feed_milestones || row.rewardFeedMilestones || ZEALY_DEFAULT_MILESTONES),
+    rewardFeedMilestoneMode: String(row.reward_feed_milestone_mode || row.rewardFeedMilestoneMode || 'HIGHEST_ONLY').toUpperCase() === 'ALL' ? 'ALL' : 'HIGHEST_ONLY',
+    lastSyncAt: row.last_sync_at || row.lastSyncAt || null,
+    lastWebhookAt: row.last_webhook_at || row.lastWebhookAt || null,
+    lastError: row.last_error || row.lastError || null,
+    updatedAt: row.updated_at || row.updatedAt || null,
+    updatedBy: row.updated_by || row.updatedBy || null,
+  };
+}
+
+function normalizeZealyMilestones(values) {
+  const list = Array.isArray(values) ? values : String(values || '').split(/[,\n]/);
+  return [...new Set(list.map(value => Number(value)).filter(value => Number.isFinite(value) && value > 0))]
+    .sort((a, b) => a - b)
+    .slice(0, 100);
+}
+
+async function getZealySettings() {
+  const result = await pool.query(`SELECT * FROM discord_zealy_settings WHERE id = 1`);
+  if (!result.rowCount) {
+    await pool.query(`INSERT INTO discord_zealy_settings (id, reward_feed_event_toggles, reward_feed_milestones) VALUES (1, $1::jsonb, $2::jsonb) ON CONFLICT (id) DO NOTHING`, [JSON.stringify(ZEALY_DEFAULT_SETTINGS.rewardFeedEventToggles), JSON.stringify(ZEALY_DEFAULT_MILESTONES)]);
+    return normalizeZealySettings({});
+  }
+  return normalizeZealySettings(result.rows[0]);
+}
+
+async function updateZealySettings(body = {}, actor = null) {
+  const current = await getZealySettings();
+  const next = normalizeZealySettings({ ...current, ...body });
+  const subdomain = Object.prototype.hasOwnProperty.call(body, 'communitySubdomain') || Object.prototype.hasOwnProperty.call(body, 'community_subdomain')
+    ? normalizeZealySubdomain(body.communitySubdomain || body.community_subdomain)
+    : next.communitySubdomain;
+  const result = await pool.query(
+    `
+    UPDATE discord_zealy_settings
+    SET enabled = $1,
+        community_subdomain = $2,
+        leaderboard_enabled = $3,
+        leaderboard_channel_id = $4,
+        leaderboard_scope = $5,
+        leaderboard_limit = $6,
+        leaderboard_refresh_minutes = $7,
+        leaderboard_message_id = $8,
+        leaderboard_include_sprint = $9,
+        leaderboard_show_xp = $10,
+        leaderboard_show_rank = $11,
+        leaderboard_show_discord_names = $12,
+        leaderboard_show_stats = $13,
+        reward_feed_enabled = $14,
+        reward_feed_channel_id = $15,
+        reward_feed_poll_minutes = $16,
+        reward_feed_event_toggles = $17::jsonb,
+        reward_feed_milestones = $18::jsonb,
+        reward_feed_milestone_mode = $19,
+        updated_by = $20,
+        updated_at = NOW()
+    WHERE id = 1
+    RETURNING *
+    `,
+    [
+      next.enabled,
+      subdomain,
+      next.leaderboardEnabled,
+      next.leaderboardChannelId ? requireDiscordId(next.leaderboardChannelId, 'Leaderboard channel ID') : null,
+      next.leaderboardScope,
+      next.leaderboardLimit,
+      next.leaderboardRefreshMinutes,
+      next.leaderboardMessageId || null,
+      next.leaderboardIncludeSprint,
+      next.leaderboardShowXp,
+      next.leaderboardShowRank,
+      next.leaderboardShowDiscordNames,
+      next.leaderboardShowStats,
+      next.rewardFeedEnabled,
+      next.rewardFeedChannelId ? requireDiscordId(next.rewardFeedChannelId, 'Reward feed channel ID') : null,
+      next.rewardFeedPollMinutes,
+      JSON.stringify(next.rewardFeedEventToggles),
+      JSON.stringify(next.rewardFeedMilestones),
+      next.rewardFeedMilestoneMode,
+      actor,
+    ]
+  );
+  return normalizeZealySettings(result.rows[0]);
+}
+
+function safeJsonHash(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value || {})).digest('hex');
+}
+
+function zealyApiPath(path, query = {}) {
+  const cleaned = String(path || '').startsWith('/') ? String(path) : `/${path}`;
+  const url = new URL(`${ZEALY_DEFAULT_API_BASE_URL}${cleaned}`);
+  Object.entries(query || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
+  });
+  return url;
+}
+
+async function getZealyClientConfig() {
+  const settings = await getZealySettings();
+  const apiKey = await getStoredSecretValue('ZEALY_API_KEY');
+  const secretSubdomain = await getStoredSecretValue('ZEALY_COMMUNITY_SUBDOMAIN');
+  const baseUrlSecret = await getStoredSecretValue('ZEALY_API_BASE_URL');
+  const baseUrl = /^https:\/\//i.test(String(baseUrlSecret || '')) ? String(baseUrlSecret).replace(/\/+$/, '') : ZEALY_DEFAULT_API_BASE_URL;
+  const subdomain = normalizeZealySubdomain(settings.communitySubdomain || secretSubdomain);
+  if (!apiKey) throw createApiError('ZEALY_API_KEY_MISSING', 'Zealy API key is not configured.', 400);
+  if (!subdomain) throw createApiError('ZEALY_SUBDOMAIN_MISSING', 'Zealy community subdomain is not configured.', 400);
+  return { apiKey, subdomain, baseUrl, settings };
+}
+
+async function zealyFetch(path, { query = {}, timeoutMs = ZEALY_FETCH_TIMEOUT_MS } = {}) {
+  const { apiKey, subdomain, baseUrl } = await getZealyClientConfig();
+  const url = new URL(`${baseUrl.replace(/\/+$/, '')}${String(path).replace('{subdomain}', encodeURIComponent(subdomain))}`);
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'x-api-key': apiKey,
+        accept: 'application/json',
+        'user-agent': ZEALY_USER_AGENT,
+      },
+      signal: controller.signal,
+    });
+    const contentType = response.headers.get('content-type') || '';
+    const retryAfter = response.headers.get('retry-after');
+    const text = await response.text();
+    if (!contentType.includes('application/json')) {
+      throw createApiError('ZEALY_NON_JSON_RESPONSE', `Zealy returned ${response.status} ${response.statusText || 'non-JSON response'}.`, response.ok ? 502 : response.status);
+    }
+    const json = text ? JSON.parse(text) : null;
+    if (!response.ok) {
+      const error = createApiError('ZEALY_API_ERROR', `Zealy API returned ${response.status}.`, response.status);
+      error.details = { status: response.status, retryAfter };
+      throw error;
+    }
+    return { json, retryAfter, url: url.toString().replace(apiKey, '***') };
+  } catch (error) {
+    if (error.name === 'AbortError') throw createApiError('ZEALY_TIMEOUT', 'Zealy API request timed out.', 504);
+    if (error instanceof SyntaxError) throw createApiError('ZEALY_INVALID_JSON', 'Zealy returned invalid JSON.', 502);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeZealyList(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.items)) return payload.items;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.leaderboard)) return payload.leaderboard;
+  if (Array.isArray(payload?.results)) return payload.results;
+  return [];
+}
+
+function normalizeZealyLeaderboard(payload, { sprint = false } = {}) {
+  return normalizeZealyList(payload).map((item, index) => {
+    const zealyUserId = String(item.userId || item.id || item.user?.id || item.member?.id || '').trim();
+    const discordUserId = String(item.discordId || item.discord?.id || item.user?.discord?.id || '').trim() || null;
+    const discordUsername = item.discordHandle || item.discord?.handle || item.user?.discord?.handle || null;
+    const xp = Number(item.xp ?? item.score ?? item.points ?? 0);
+    return {
+      zealyUserId,
+      zealyName: item.name || item.user?.name || item.username || null,
+      discordUserId,
+      discordUsername,
+      xp: Number.isFinite(xp) ? xp : 0,
+      rank: Number(item.rank || index + 1),
+      sprintXp: sprint ? (Number.isFinite(xp) ? xp : 0) : null,
+      sprintRank: sprint ? Number(item.rank || index + 1) : null,
+      avatarUrl: item.avatar || item.avatarUrl || item.user?.avatar || null,
+      rawPayload: item,
+    };
+  }).filter(row => row.zealyUserId);
+}
+
+async function fetchZealyLeaderboard({ sprintId = null, limit = 25 } = {}) {
+  const query = { page: 0, limit };
+  if (sprintId) query.sprintId = sprintId;
+  const result = await zealyFetch('/public/communities/{subdomain}/leaderboard', { query });
+  return normalizeZealyLeaderboard(result.json, { sprint: Boolean(sprintId) });
+}
+
+async function fetchZealySprints({ onlyCurrent = true } = {}) {
+  const result = await zealyFetch('/public/communities/{subdomain}/leaderboard/sprint', { query: { onlyCurrent } });
+  return normalizeZealyList(result.json);
+}
+
+async function fetchZealyWebhookTypes() {
+  const result = await zealyFetch('/public/communities/{subdomain}/webhooks-event-types');
+  return normalizeZealyList(result.json).map(item => typeof item === 'string' ? item : item.eventType || item.type || item.name).filter(Boolean);
+}
+
+async function testZealyConnection() {
+  const [leaderboard, sprints, webhookTypes] = await Promise.all([
+    fetchZealyLeaderboard({ limit: 5 }).catch(error => ({ error })),
+    fetchZealySprints({ onlyCurrent: true }).catch(error => ({ error })),
+    fetchZealyWebhookTypes().catch(error => ({ error })),
+  ]);
+  return {
+    ok: !leaderboard.error,
+    leaderboardAvailable: !leaderboard.error,
+    sprintAvailable: !sprints.error,
+    webhookEventTypesAvailable: !webhookTypes.error,
+    leaderboardSampleCount: Array.isArray(leaderboard) ? leaderboard.length : 0,
+    currentSprint: Array.isArray(sprints) ? sprints[0] || null : null,
+    webhookEventTypes: Array.isArray(webhookTypes) ? webhookTypes : [],
+    errors: [leaderboard.error, sprints.error, webhookTypes.error].filter(Boolean).map(error => sanitizePublicErrorMessage(error)),
+    capabilityMatrix: zealyCapabilityMatrix(Array.isArray(webhookTypes) ? webhookTypes : []),
+  };
+}
+
+function zealyCapabilityMatrix(webhookTypes = []) {
+  const hasWebhook = (needle) => webhookTypes.some(type => String(type).toLowerCase().includes(needle));
+  return [
+    { capability: 'leaderboard', status: 'supported', source: 'API', route: 'GET /public/communities/{subdomain}/leaderboard' },
+    { capability: 'sprint leaderboard', status: 'supported when sprint exists', source: 'API', route: 'GET /public/communities/{subdomain}/leaderboard?sprintId=...' },
+    { capability: 'current sprint', status: 'supported', source: 'API', route: 'GET /public/communities/{subdomain}/leaderboard/sprint?onlyCurrent=true' },
+    { capability: 'members', status: 'supported from leaderboard and user lookup', source: 'API', route: 'GET /public/communities/{subdomain}/users/{userId}' },
+    { capability: 'XP changes', status: hasWebhook('xp') ? 'webhook-supported' : 'inferred safely from leaderboard deltas', source: hasWebhook('xp') ? 'WEBHOOK' : 'POLL_DELTA' },
+    { capability: 'quest completions', status: hasWebhook('quest') ? 'webhook-supported' : 'not inferred without quest identity', source: hasWebhook('quest') ? 'WEBHOOK' : 'UNAVAILABLE' },
+    { capability: 'reward claims/redemptions', status: hasWebhook('reward') || hasWebhook('shop') ? 'webhook-supported' : 'not inferred without reward context', source: hasWebhook('reward') || hasWebhook('shop') ? 'WEBHOOK' : 'UNAVAILABLE' },
+    { capability: 'manual XP changes', status: hasWebhook('xp') ? 'webhook-supported if emitted' : 'generic XP delta only', source: hasWebhook('xp') ? 'WEBHOOK' : 'POLL_DELTA' },
+    { capability: 'Discord-linked identity', status: 'supported where Zealy returns discordId/discordHandle', source: 'API/WEBHOOK' },
+  ];
+}
+
+function zealyDisplayName(row = {}) {
+  if (row.discord_user_id || row.discordUserId) return `<@${row.discord_user_id || row.discordUserId}>`;
+  return row.discord_username || row.discordUsername || row.zealy_name || row.zealyName || 'A TTT Markets community member';
+}
+
+function renderZealyTemplateString(template, values = {}) {
+  return String(template || '').replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
+    return values[key] === undefined || values[key] === null ? '' : String(values[key]);
+  });
+}
+
+function zealyEventValues(event = {}) {
+  const metadata = event.metadata || {};
+  const xpDelta = Number(event.xp_delta ?? event.xpDelta ?? 0);
+  const rank = event.rank_after ?? event.rankAfter ?? event.rank;
+  const previousRank = event.rank_before ?? event.rankBefore ?? '';
+  return {
+    zealy_name: event.zealy_name || event.zealyName || metadata.zealyName || '',
+    discord_name: event.discord_username || event.discordUsername || metadata.discordUsername || '',
+    user_display: event.user_display || event.userDisplay || zealyDisplayName(event),
+    quest_name: event.quest_name || event.questName || metadata.questName || 'a Zealy quest',
+    quest_type: event.quest_type || event.questType || metadata.questType || '',
+    xp_delta: Math.abs(xpDelta),
+    formatted_xp_delta: xpDelta > 0 ? `+${xpDelta}` : String(xpDelta),
+    current_xp: event.current_xp ?? event.currentXp ?? metadata.currentXp ?? '',
+    rank: rank || '',
+    previous_rank: previousRank,
+    rank_change: previousRank && rank ? Number(previousRank) - Number(rank) : '',
+    reward_name: event.reward_name || event.rewardName || metadata.rewardName || '',
+    reward_name_or_default: event.reward_name || event.rewardName || metadata.rewardName || 'Reward claimed in Zealy.',
+    milestone: event.milestone || metadata.milestone || '',
+    sprint_name: event.sprint_name || event.sprintName || metadata.sprintName || '',
+    community_name: metadata.communityName || BRAND_NAME,
+    discord_time: `<t:${Math.floor(new Date(event.occurred_at || event.occurredAt || Date.now()).getTime() / 1000)}:R>`,
+    zealy_url: metadata.zealyUrl || 'https://zealy.io',
+  };
+}
+
+async function seedZealyTemplates() {
+  for (const template of ZEALY_DEFAULT_TEMPLATES) {
+    await pool.query(
+      `
+      INSERT INTO discord_zealy_templates
+        (name, event_type, title_template, body_template, colour, is_seeded)
+      SELECT $1, $2, $3, $4, '#f35023', true
+      WHERE NOT EXISTS (
+        SELECT 1 FROM discord_zealy_templates WHERE event_type = $2 AND is_seeded = true
+      )
+      `,
+      [template.name, template.eventType, template.titleTemplate, template.bodyTemplate]
+    );
+  }
+}
+
+function serializeZealyTemplate(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    eventType: row.event_type,
+    enabled: row.enabled,
+    titleTemplate: row.title_template,
+    bodyTemplate: row.body_template,
+    colour: row.colour,
+    imageUrl: row.image_url,
+    thumbnailUrl: row.thumbnail_url,
+    footerText: row.footer_text,
+    buttons: row.buttons || [],
+    reactions: row.reactions || [],
+    isSeeded: row.is_seeded,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    updatedBy: row.updated_by,
+  };
+}
+
+function serializeZealyEvent(row) {
+  return {
+    id: row.id,
+    providerEventId: row.provider_event_id,
+    eventType: row.event_type,
+    source: row.source,
+    zealyUserId: row.zealy_user_id,
+    discordUserId: row.discord_user_id,
+    questId: row.quest_id,
+    questName: row.quest_name,
+    xpDelta: row.xp_delta,
+    currentXp: row.current_xp,
+    rankBefore: row.rank_before,
+    rankAfter: row.rank_after,
+    rewardName: row.reward_name,
+    metadata: row.metadata || {},
+    occurredAt: row.occurred_at,
+    processedAt: row.processed_at,
+    discordChannelId: row.discord_channel_id,
+    discordMessageId: row.discord_message_id,
+    status: row.status,
+    lastError: row.last_error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function serializeZealyMember(row) {
+  return {
+    zealyUserId: row.zealy_user_id,
+    zealyName: row.zealy_name,
+    discordUserId: row.discord_user_id,
+    discordUsername: row.discord_username,
+    xp: row.xp,
+    rank: row.rank,
+    sprintXp: row.sprint_xp,
+    sprintRank: row.sprint_rank,
+    avatarUrl: row.avatar_url,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function upsertZealyMembers(members, { sprint = false } = {}) {
+  const previous = new Map((await pool.query(`SELECT * FROM discord_zealy_members`)).rows.map(row => [row.zealy_user_id, row]));
+  const events = [];
+  for (const member of members) {
+    const before = previous.get(member.zealyUserId);
+    await pool.query(
+      `
+      INSERT INTO discord_zealy_members
+        (zealy_user_id, zealy_name, discord_user_id, discord_username, xp, rank, sprint_xp, sprint_rank, avatar_url, raw_payload, last_seen_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,NOW(),NOW())
+      ON CONFLICT (zealy_user_id)
+      DO UPDATE SET zealy_name = EXCLUDED.zealy_name,
+                    discord_user_id = COALESCE(EXCLUDED.discord_user_id, discord_zealy_members.discord_user_id),
+                    discord_username = COALESCE(EXCLUDED.discord_username, discord_zealy_members.discord_username),
+                    xp = EXCLUDED.xp,
+                    rank = EXCLUDED.rank,
+                    sprint_xp = COALESCE(EXCLUDED.sprint_xp, discord_zealy_members.sprint_xp),
+                    sprint_rank = COALESCE(EXCLUDED.sprint_rank, discord_zealy_members.sprint_rank),
+                    avatar_url = COALESCE(EXCLUDED.avatar_url, discord_zealy_members.avatar_url),
+                    raw_payload = EXCLUDED.raw_payload,
+                    last_seen_at = NOW(),
+                    updated_at = NOW()
+      `,
+      [member.zealyUserId, member.zealyName, member.discordUserId, member.discordUsername, member.xp, member.rank, member.sprintXp, member.sprintRank, member.avatarUrl, JSON.stringify(member.rawPayload || {})]
+    );
+    events.push(...detectZealyDeltaEvents(before, member));
+  }
+  return events;
+}
+
+function detectZealyDeltaEvents(before, after, settings = ZEALY_DEFAULT_SETTINGS) {
+  if (!after?.zealyUserId) return [];
+  const occurredAt = new Date();
+  if (!before) {
+    return [{
+      providerEventId: `poll:new-member:${after.zealyUserId}`,
+      eventType: 'NEW_MEMBER_JOINED',
+      source: 'POLL_DELTA',
+      zealyUserId: after.zealyUserId,
+      discordUserId: after.discordUserId,
+      currentXp: after.xp,
+      rankAfter: after.rank,
+      metadata: { zealyName: after.zealyName, discordUsername: after.discordUsername },
+      occurredAt,
+    }];
+  }
+  const events = [];
+  const xpBefore = Number(before.xp || 0);
+  const xpAfter = Number(after.xp || 0);
+  const delta = xpAfter - xpBefore;
+  if (delta !== 0) {
+    events.push({
+      providerEventId: `poll:xp:${after.zealyUserId}:${xpBefore}:${xpAfter}`,
+      eventType: delta > 0 ? 'XP_EARNED' : 'XP_DEDUCTED',
+      source: 'POLL_DELTA',
+      zealyUserId: after.zealyUserId,
+      discordUserId: after.discordUserId || before.discord_user_id,
+      xpDelta: delta,
+      currentXp: xpAfter,
+      rankBefore: before.rank,
+      rankAfter: after.rank,
+      metadata: { zealyName: after.zealyName, discordUsername: after.discordUsername },
+      occurredAt,
+    });
+    const crossed = detectZealyMilestones(xpBefore, xpAfter, settings.rewardFeedMilestones || ZEALY_DEFAULT_MILESTONES, settings.rewardFeedMilestoneMode || 'HIGHEST_ONLY');
+    for (const milestone of crossed) {
+      events.push({
+        providerEventId: `poll:milestone:${after.zealyUserId}:${milestone}`,
+        eventType: 'MILESTONE_REACHED',
+        source: 'POLL_DELTA',
+        zealyUserId: after.zealyUserId,
+        discordUserId: after.discordUserId || before.discord_user_id,
+        currentXp: xpAfter,
+        rankBefore: before.rank,
+        rankAfter: after.rank,
+        metadata: { milestone, zealyName: after.zealyName, discordUsername: after.discordUsername },
+        occurredAt,
+      });
+    }
+  }
+  const rankBefore = Number(before.rank || 0);
+  const rankAfter = Number(after.rank || 0);
+  if (rankBefore && rankAfter && rankAfter < rankBefore) {
+    events.push({
+      providerEventId: `poll:rank:${after.zealyUserId}:${rankBefore}:${rankAfter}`,
+      eventType: rankAfter <= 3 && rankBefore > 3 ? 'LEADERBOARD_TOP_3_ENTRY' : rankAfter <= 10 && rankBefore > 10 ? 'LEADERBOARD_TOP_10_ENTRY' : 'RANK_IMPROVEMENT',
+      source: 'POLL_DELTA',
+      zealyUserId: after.zealyUserId,
+      discordUserId: after.discordUserId || before.discord_user_id,
+      currentXp: xpAfter,
+      rankBefore,
+      rankAfter,
+      metadata: { zealyName: after.zealyName, discordUsername: after.discordUsername },
+      occurredAt,
+    });
+  }
+  return events;
+}
+
+function detectZealyMilestones(beforeXp, afterXp, milestones = ZEALY_DEFAULT_MILESTONES, mode = 'HIGHEST_ONLY') {
+  if (afterXp <= beforeXp) return [];
+  const crossed = normalizeZealyMilestones(milestones).filter(value => value > beforeXp && value <= afterXp);
+  if (mode === 'ALL') return crossed;
+  return crossed.length ? [crossed[crossed.length - 1]] : [];
+}
+
+async function insertZealyEvent(event) {
+  const result = await pool.query(
+    `
+    INSERT INTO discord_zealy_events
+      (provider_event_id, event_type, source, zealy_user_id, discord_user_id, quest_id, quest_name, xp_delta, current_xp, rank_before, rank_after, reward_name, metadata, occurred_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14)
+    ON CONFLICT DO NOTHING
+    RETURNING *
+    `,
+    [
+      event.providerEventId || null,
+      event.eventType,
+      event.source,
+      event.zealyUserId || null,
+      event.discordUserId || null,
+      event.questId || null,
+      event.questName || null,
+      event.xpDelta ?? null,
+      event.currentXp ?? null,
+      event.rankBefore ?? null,
+      event.rankAfter ?? null,
+      event.rewardName || null,
+      JSON.stringify(event.metadata || {}),
+      event.occurredAt || new Date(),
+    ]
+  );
+  return result.rows[0] || null;
+}
+
+async function buildZealyLeaderboardMessage(settings = null) {
+  const resolved = settings || await getZealySettings();
+  const members = (await pool.query(`SELECT * FROM discord_zealy_members WHERE rank IS NOT NULL ORDER BY rank ASC LIMIT $1`, [resolved.leaderboardLimit])).rows;
+  const total = await pool.query(`SELECT COUNT(*)::int AS count FROM discord_zealy_members`);
+  const sprint = await fetchZealySprints({ onlyCurrent: true }).catch(() => []);
+  const medals = ['🥇', '🥈', '🥉'];
+  const lines = members.map((row, index) => {
+    const place = medals[index] || `${row.rank || index + 1}.`;
+    const name = resolved.leaderboardShowDiscordNames ? zealyDisplayName(row) : (row.zealy_name || 'TTT Trader');
+    const xp = resolved.leaderboardShowXp ? ` — ${Number(row.xp || 0).toLocaleString('en-GB')} XP` : '';
+    return `${place} ${name}${xp}`;
+  });
+  const currentSprint = Array.isArray(sprint) ? sprint[0] : null;
+  return [
+    '🏆 **TTT MARKETS COMMUNITY LEADERBOARD**',
+    '',
+    lines.length ? lines.join('\n') : 'No Zealy leaderboard members cached yet.',
+    '',
+    resolved.leaderboardShowStats ? `Current Sprint: ${currentSprint?.name || 'None'}` : null,
+    resolved.leaderboardShowStats ? `Community Members: ${Number(total.rows[0]?.count || 0).toLocaleString('en-GB')}` : null,
+    `Last updated: <t:${Math.floor(Date.now() / 1000)}:R>`,
+  ].filter(Boolean).join('\n');
+}
+
+async function publishZealyLeaderboard({ recreate = false } = {}) {
+  const settings = await getZealySettings();
+  if (!settings.leaderboardChannelId) throw createApiError('ZEALY_LEADERBOARD_CHANNEL_REQUIRED', 'Zealy leaderboard channel is not configured.', 400);
+  const channel = await fetchTextChannel(settings.leaderboardChannelId);
+  const content = await buildZealyLeaderboardMessage(settings);
+  let message = null;
+  if (settings.leaderboardMessageId && !recreate) {
+    try {
+      message = await channel.messages.fetch(settings.leaderboardMessageId);
+      message = await message.edit({ content, allowedMentions: { parse: [] } });
+    } catch (error) {
+      message = null;
+    }
+  }
+  if (!message) {
+    message = await channel.send({ content, allowedMentions: { parse: [] } });
+  }
+  await pool.query(`UPDATE discord_zealy_settings SET leaderboard_message_id = $1, last_sync_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = 1`, [message.id]);
+  await logActivity({ type: 'zealy', action: 'leaderboard_published', source: 'worker', metadata: { channelId: channel.id, messageId: message.id } });
+  return { messageId: message.id, channelId: channel.id, content };
+}
+
+async function syncZealyLeaderboard({ publish = false } = {}) {
+  if (zealyLeaderboardRunning) return { skipped: true, reason: 'already_running' };
+  zealyLeaderboardRunning = true;
+  try {
+    const settings = await getZealySettings();
+    const currentSprint = settings.leaderboardIncludeSprint ? (await fetchZealySprints({ onlyCurrent: true }).catch(() => []))[0] : null;
+    const members = await fetchZealyLeaderboard({ limit: Math.max(25, settings.leaderboardLimit || 10) });
+    const events = await upsertZealyMembers(members, { sprint: false });
+    if (currentSprint?.id) {
+      const sprintMembers = await fetchZealyLeaderboard({ sprintId: currentSprint.id, limit: Math.max(25, settings.leaderboardLimit || 10) }).catch(() => []);
+      await upsertZealyMembers(sprintMembers, { sprint: true });
+    }
+    await pool.query(
+      `INSERT INTO discord_zealy_snapshots (snapshot_type, payload_hash, raw_payload, member_count) VALUES ('LEADERBOARD', $1, $2::jsonb, $3) ON CONFLICT DO NOTHING`,
+      [safeJsonHash(members), JSON.stringify(members), members.length]
+    );
+    let inserted = 0;
+    for (const event of events) {
+      const saved = await insertZealyEvent(event);
+      if (saved) inserted += 1;
+    }
+    await pool.query(`UPDATE discord_zealy_settings SET last_sync_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = 1`);
+    if (publish || settings.leaderboardEnabled) await publishZealyLeaderboard();
+    if (settings.rewardFeedEnabled) await processPendingZealyEvents();
+    return { synced: true, members: members.length, eventsDetected: inserted, currentSprint };
+  } catch (error) {
+    await pool.query(`UPDATE discord_zealy_settings SET last_error = $1, updated_at = NOW() WHERE id = 1`, [sanitizePublicErrorMessage(error)]);
+    throw error;
+  } finally {
+    zealyLeaderboardRunning = false;
+  }
+}
+
+async function zealyTemplateForEvent(eventType) {
+  const result = await pool.query(`SELECT * FROM discord_zealy_templates WHERE event_type = $1 AND enabled = true ORDER BY is_seeded DESC, id ASC LIMIT 1`, [eventType]);
+  if (result.rowCount) return result.rows[0];
+  const fallback = await pool.query(`SELECT * FROM discord_zealy_templates WHERE event_type = 'XP_EARNED' AND enabled = true ORDER BY id ASC LIMIT 1`);
+  return fallback.rows[0] || { title_template: 'Zealy update', body_template: '{{user_display}} earned {{formatted_xp_delta}} XP', colour: '#f35023', reactions: [] };
+}
+
+async function sendZealyEvent(eventRow, { channelId = null } = {}) {
+  const settings = await getZealySettings();
+  const toggles = settings.rewardFeedEventToggles || {};
+  if (toggles[eventRow.event_type] === false) {
+    await pool.query(`UPDATE discord_zealy_events SET status = 'SKIPPED', processed_at = NOW(), updated_at = NOW() WHERE id = $1`, [eventRow.id]);
+    return { skipped: true };
+  }
+  const destinationChannelId = channelId || settings.rewardFeedChannelId;
+  if (!destinationChannelId) throw createApiError('ZEALY_REWARD_CHANNEL_REQUIRED', 'Zealy reward feed channel is not configured.', 400);
+  const channel = await fetchTextChannel(destinationChannelId);
+  const template = await zealyTemplateForEvent(eventRow.event_type);
+  const values = zealyEventValues(eventRow);
+  const embed = new EmbedBuilder()
+    .setTitle(renderZealyTemplateString(template.title_template, values).slice(0, 256))
+    .setDescription(renderZealyTemplateString(template.body_template, values).slice(0, 4096))
+    .setColor(parseHexColor(template.colour || '#f35023'))
+    .setTimestamp(new Date(eventRow.occurred_at || Date.now()));
+  if (template.footer_text) embed.setFooter({ text: renderZealyTemplateString(template.footer_text, values).slice(0, 2048) });
+  if (template.thumbnail_url) embed.setThumbnail(template.thumbnail_url);
+  if (template.image_url) embed.setImage(template.image_url);
+  const message = await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+  await addReactions(message, sanitizeReactions(template.reactions || []));
+  await pool.query(`UPDATE discord_zealy_events SET status = 'POSTED', processed_at = NOW(), discord_channel_id = $2, discord_message_id = $3, last_error = NULL, updated_at = NOW() WHERE id = $1`, [eventRow.id, channel.id, message.id]);
+  await logActivity({ type: 'zealy', action: 'reward_notification_posted', source: 'worker', entityType: 'discord_zealy_event', entityId: String(eventRow.id), metadata: { eventType: eventRow.event_type, channelId: channel.id, messageId: message.id } });
+  return { sent: true, messageId: message.id, channelId: channel.id };
+}
+
+async function processPendingZealyEvents() {
+  const result = await pool.query(`SELECT * FROM discord_zealy_events WHERE status IN ('PENDING','FAILED') ORDER BY occurred_at ASC LIMIT 25`);
+  let posted = 0;
+  let failed = 0;
+  for (const row of result.rows) {
+    try {
+      const sent = await sendZealyEvent(row);
+      if (sent.sent) posted += 1;
+    } catch (error) {
+      failed += 1;
+      await pool.query(`UPDATE discord_zealy_events SET status = 'FAILED', last_error = $2, updated_at = NOW() WHERE id = $1`, [row.id, sanitizePublicErrorMessage(error)]);
+    }
+  }
+  return { processed: result.rows.length, posted, failed };
+}
+
+function parseHexColor(value) {
+  const hex = String(value || '').replace('#', '');
+  return /^[a-f0-9]{6}$/i.test(hex) ? Number.parseInt(hex, 16) : BRAND_COLOR;
+}
+
+async function getZealySecretStatus() {
+  const result = await pool.query(`SELECT * FROM discord_secret_settings WHERE key = ANY($1::text[])`, [['ZEALY_API_KEY', 'ZEALY_COMMUNITY_SUBDOMAIN', 'ZEALY_WEBHOOK_SECRET', 'ZEALY_API_BASE_URL']]);
+  const existing = new Map(result.rows.map(row => [row.key, serializeSecret(row)]));
+  return Object.fromEntries(['ZEALY_API_KEY', 'ZEALY_COMMUNITY_SUBDOMAIN', 'ZEALY_WEBHOOK_SECRET', 'ZEALY_API_BASE_URL'].map(key => [key, existing.get(key) || {
+    key,
+    label: getSecretDefinition(key).label,
+    configured: Boolean(process.env[key]),
+    lastFour: process.env[key] ? String(process.env[key]).slice(-4) : null,
+    requiresRestart: false,
+    updatedAt: null,
+    updatedBy: process.env[key] ? 'environment' : null,
+  }]));
+}
+
+async function getZealyOverview() {
+  const [settings, secrets, members, eventsToday, notificationsToday, failed, recentEvents, templates] = await Promise.all([
+    getZealySettings(),
+    getZealySecretStatus(),
+    pool.query(`SELECT COUNT(*)::int AS count FROM discord_zealy_members`),
+    pool.query(`SELECT COUNT(*)::int AS count FROM discord_zealy_events WHERE occurred_at >= CURRENT_DATE`),
+    pool.query(`SELECT COUNT(*)::int AS count FROM discord_zealy_events WHERE status = 'POSTED' AND processed_at >= CURRENT_DATE`),
+    pool.query(`SELECT COUNT(*)::int AS count FROM discord_zealy_events WHERE status = 'FAILED'`),
+    pool.query(`SELECT * FROM discord_zealy_events ORDER BY occurred_at DESC LIMIT 10`),
+    pool.query(`SELECT * FROM discord_zealy_templates ORDER BY event_type ASC, id ASC`),
+  ]);
+  const currentSprint = await fetchZealySprints({ onlyCurrent: true }).catch(() => []);
+  const connected = Boolean(secrets.ZEALY_API_KEY?.configured && (settings.communitySubdomain || secrets.ZEALY_COMMUNITY_SUBDOMAIN?.configured));
+  return {
+    connected,
+    settings,
+    secrets,
+    communitySubdomain: settings.communitySubdomain,
+    apiStatus: connected ? 'Configured' : 'Not configured',
+    webhookStatus: secrets.ZEALY_WEBHOOK_SECRET?.configured ? 'Secret configured' : 'No secret configured',
+    lastSuccessfulSync: settings.lastSyncAt,
+    lastWebhookReceived: settings.lastWebhookAt,
+    membersCached: members.rows[0]?.count || 0,
+    currentSprint: Array.isArray(currentSprint) ? currentSprint[0] || null : null,
+    eventsDetectedToday: eventsToday.rows[0]?.count || 0,
+    notificationsPostedToday: notificationsToday.rows[0]?.count || 0,
+    failedNotifications: failed.rows[0]?.count || 0,
+    leaderboardMessageStatus: settings.leaderboardMessageId ? 'Stored' : 'Not published',
+    nextScheduledRefresh: settings.leaderboardEnabled ? new Date(Date.now() + settings.leaderboardRefreshMinutes * 60_000).toISOString() : null,
+    lastError: settings.lastError,
+    recentEvents: recentEvents.rows.map(serializeZealyEvent),
+    templates: templates.rows.map(serializeZealyTemplate),
+    capabilityMatrix: zealyCapabilityMatrix([]),
+  };
+}
+
+function normalizeZealyWebhookEvent(payload = {}) {
+  const eventType = String(payload.event || payload.eventType || payload.type || payload.name || 'UNKNOWN').toUpperCase();
+  const data = payload.data || payload.payload || payload;
+  const user = data.user || data.member || data.account || {};
+  const quest = data.quest || data.claimedQuest || data.review?.quest || {};
+  const reward = data.reward || data.shopReward || data.redemption || {};
+  const xpDelta = Number(data.xpDelta ?? data.xp_delta ?? data.xp ?? quest.xp ?? reward.xp ?? 0);
+  const zealyUserId = String(user.id || data.userId || data.zealyUserId || '').trim() || null;
+  const discordUserId = user.discord?.id || user.discordId || data.discordId || null;
+  const mappedType = eventType.includes('DAILY') ? 'DAILY_QUEST_COMPLETED'
+    : eventType.includes('WEEKLY') ? 'WEEKLY_QUEST_COMPLETED'
+      : eventType.includes('QUEST') ? 'QUEST_COMPLETED'
+        : eventType.includes('REWARD') || eventType.includes('SHOP') || eventType.includes('REDEMPTION') ? 'SHOP_REWARD_REDEMPTION'
+          : eventType.includes('USER') || eventType.includes('MEMBER') ? 'NEW_MEMBER_JOINED'
+            : eventType.includes('XP') && xpDelta < 0 ? 'XP_DEDUCTED'
+              : eventType.includes('XP') ? 'XP_EARNED'
+                : eventType;
+  return {
+    providerEventId: payload.id || payload.eventId || payload.event_id || payload.deliveryId || null,
+    eventType: mappedType,
+    source: 'WEBHOOK',
+    zealyUserId,
+    discordUserId,
+    questId: quest.id || data.questId || null,
+    questName: quest.name || data.questName || null,
+    xpDelta,
+    currentXp: data.currentXp || user.xp || null,
+    rewardName: reward.name || data.rewardName || null,
+    metadata: {
+      originalEventType: eventType,
+      zealyName: user.name || data.zealyName || null,
+      discordUsername: user.discord?.handle || user.discordHandle || null,
+      webhookConfirmed: true,
+    },
+    occurredAt: data.createdAt || payload.createdAt || payload.timestamp || new Date(),
+  };
+}
+
+function verifyZealyWebhookSecret(payload = {}, configuredSecret = null) {
+  if (!configuredSecret) return true;
+  const provided = payload.secret || payload.webhookSecret || payload.webhook_secret;
+  if (!provided) return false;
+  const a = Buffer.from(String(provided));
+  const b = Buffer.from(String(configuredSecret));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function zealySyncDue(lastAt, minutes) {
+  if (!lastAt) return true;
+  const last = typeof lastAt === 'number' ? lastAt : new Date(lastAt).getTime();
+  if (!Number.isFinite(last)) return true;
+  return Date.now() - last >= Math.max(5, Number(minutes || 10)) * 60_000;
+}
+
+async function handleZealyWebhook(payload = {}) {
+  const secret = await getStoredSecretValue('ZEALY_WEBHOOK_SECRET');
+  const signatureValid = verifyZealyWebhookSecret(payload, secret);
+  const payloadHash = safeJsonHash(payload);
+  const deliveryId = payload.deliveryId || payload.delivery_id || payload.id || payload.eventId || payload.event_id || null;
+  const eventType = payload.event || payload.eventType || payload.type || 'UNKNOWN';
+  const receipt = await pool.query(
+    `
+    INSERT INTO discord_zealy_webhook_receipts
+      (delivery_id, event_type, signature_valid, payload_hash, raw_payload, status)
+    VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+    ON CONFLICT DO NOTHING
+    RETURNING *
+    `,
+    [deliveryId, eventType, signatureValid, payloadHash, JSON.stringify(payload), signatureValid ? 'RECEIVED' : 'REJECTED']
+  );
+  await pool.query(`UPDATE discord_zealy_settings SET last_webhook_at = NOW(), updated_at = NOW() WHERE id = 1`);
+  if (!signatureValid) {
+    await logActivity({ type: 'zealy', action: 'webhook_rejected', source: 'zealy_webhook', metadata: { eventType, deliveryId } });
+    throw createApiError('ZEALY_WEBHOOK_INVALID_SECRET', 'Invalid Zealy webhook secret.', 401);
+  }
+  if (!receipt.rowCount) return { duplicate: true };
+  const normalized = normalizeZealyWebhookEvent(payload);
+  const saved = await insertZealyEvent(normalized);
+  await pool.query(`UPDATE discord_zealy_webhook_receipts SET processed_at = NOW(), status = $2 WHERE id = $1`, [receipt.rows[0].id, saved ? 'PROCESSED' : 'DUPLICATE']);
+  await logActivity({ type: 'zealy', action: 'webhook_received', source: 'zealy_webhook', metadata: { eventType: normalized.eventType, deliveryId, saved: Boolean(saved) } });
+  if (saved) processPendingZealyEvents().catch(error => console.log(`Zealy webhook event post failed: ${error.message}`));
+  return { received: true, eventCreated: Boolean(saved), event: saved ? serializeZealyEvent(saved) : null };
+}
+
+function startZealySchedulers() {
+  if (zealyLeaderboardIntervalHandle) clearInterval(zealyLeaderboardIntervalHandle);
+  if (zealyRewardIntervalHandle) clearInterval(zealyRewardIntervalHandle);
+  zealyLeaderboardIntervalHandle = setInterval(async () => {
+    const settings = await getZealySettings().catch(() => ZEALY_DEFAULT_SETTINGS);
+    if (settings.enabled && settings.leaderboardEnabled && zealySyncDue(lastZealyLeaderboardPublishAt, settings.leaderboardRefreshMinutes)) {
+      try {
+        if (zealySyncDue(settings.lastSyncAt, settings.leaderboardRefreshMinutes)) await syncZealyLeaderboard({ publish: true });
+        else await publishZealyLeaderboard();
+        lastZealyLeaderboardPublishAt = Date.now();
+      } catch (error) {
+        console.log(`Zealy leaderboard sync failed: ${error.message}`);
+      }
+    }
+  }, 60 * 1000);
+  zealyRewardIntervalHandle = setInterval(async () => {
+    if (zealyRewardRunning) return;
+    zealyRewardRunning = true;
+    try {
+      const settings = await getZealySettings();
+      if (settings.enabled && settings.rewardFeedEnabled && zealySyncDue(lastZealyRewardPollAt, settings.rewardFeedPollMinutes)) {
+        await syncZealyLeaderboard({ publish: false }).catch(error => console.log(`Zealy reward delta sync failed: ${error.message}`));
+        await processPendingZealyEvents();
+        lastZealyRewardPollAt = Date.now();
+      }
+    } finally {
+      zealyRewardRunning = false;
+    }
+  }, 60 * 1000);
 }
 
 async function pollDuePayoutFeedItems() {
@@ -5798,6 +6851,11 @@ function startCRMStatsServer() {
     }
   });
 
+  app.post('/api/webhooks/zealy', asyncRoute(async (req, res) => {
+    const result = await handleZealyWebhook(req.body || {});
+    res.status(202).json({ ok: true, received: true, duplicate: Boolean(result.duplicate) });
+  }));
+
   router.use(requireCrmAuth);
 
   router.get('/health', asyncRoute(async (req, res) => {
@@ -6850,6 +7908,227 @@ function startCRMStatsServer() {
     apiSuccess(res, result, { status: 201, extra: result });
   }));
 
+  router.get('/zealy/overview', asyncRoute(async (req, res) => {
+    const overview = await getZealyOverview();
+    apiSuccess(res, overview, { extra: { overview } });
+  }));
+
+  router.get('/zealy/settings', asyncRoute(async (req, res) => {
+    const settings = await getZealySettings();
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.patch('/zealy/settings', asyncRoute(async (req, res) => {
+    const settings = await updateZealySettings(req.body || {}, getActor(req));
+    await logActivity({ type: 'zealy', action: 'settings_changed', actor: getActor(req), source: 'crm_api', metadata: { keys: Object.keys(req.body || {}) } });
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.get('/zealy/secrets', asyncRoute(async (req, res) => {
+    const secrets = await getZealySecretStatus();
+    apiSuccess(res, secrets, { extra: { secrets } });
+  }));
+
+  router.put('/zealy/secrets/:key', asyncRoute(async (req, res) => {
+    const key = String(req.params.key || '').trim().toUpperCase();
+    if (!['ZEALY_API_KEY', 'ZEALY_COMMUNITY_SUBDOMAIN', 'ZEALY_WEBHOOK_SECRET', 'ZEALY_API_BASE_URL'].includes(key)) throw createApiError('ZEALY_SECRET_UNSUPPORTED', 'Unsupported Zealy secret key.', 400);
+    if (!req.body.value) throw createApiError('ZEALY_SECRET_VALUE_REQUIRED', 'Secret value is required.', 400);
+    const encrypted = encryptSecretValue(req.body.value);
+    const definition = getSecretDefinition(key);
+    const result = await pool.query(
+      `
+      INSERT INTO discord_secret_settings
+        (key, encrypted_value, iv, auth_tag, last_four, configured, requires_restart, updated_by, updated_at)
+      VALUES ($1, $2, $3, $4, $5, true, $6, $7, NOW())
+      ON CONFLICT (key)
+      DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value,
+                    iv = EXCLUDED.iv,
+                    auth_tag = EXCLUDED.auth_tag,
+                    last_four = EXCLUDED.last_four,
+                    configured = true,
+                    requires_restart = EXCLUDED.requires_restart,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = NOW()
+      RETURNING *
+      `,
+      [key, encrypted.encryptedValue, encrypted.iv, encrypted.authTag, encrypted.lastFour, definition.requiresRestart, getActor(req)]
+    );
+    if (key === 'ZEALY_COMMUNITY_SUBDOMAIN') await updateZealySettings({ communitySubdomain: req.body.value }, getActor(req)).catch(() => {});
+    await logActivity({ type: 'zealy', action: 'secret_upserted', actor: getActor(req), source: 'crm_api', entityType: 'secret', entityId: key });
+    const secret = serializeSecret(result.rows[0]);
+    apiSuccess(res, secret, { extra: { secret } });
+  }));
+
+  router.delete('/zealy/secrets/:key', asyncRoute(async (req, res) => {
+    const key = String(req.params.key || '').trim().toUpperCase();
+    const result = await pool.query(
+      `UPDATE discord_secret_settings SET encrypted_value = NULL, iv = NULL, auth_tag = NULL, last_four = NULL, configured = false, updated_by = $2, updated_at = NOW() WHERE key = $1 RETURNING *`,
+      [key, getActor(req)]
+    );
+    await logActivity({ type: 'zealy', action: 'secret_deleted', actor: getActor(req), source: 'crm_api', entityType: 'secret', entityId: key });
+    apiSuccess(res, result.rowCount ? serializeSecret(result.rows[0]) : { key, configured: false });
+  }));
+
+  router.post('/zealy/secrets/:key/test', asyncRoute(async (req, res) => {
+    const key = String(req.params.key || '').trim().toUpperCase();
+    const value = await getStoredSecretValue(key);
+    apiSuccess(res, { key, configured: Boolean(value), decryptable: Boolean(value) });
+  }));
+
+  router.post('/zealy/test-connection', asyncRoute(async (req, res) => {
+    const result = await testZealyConnection();
+    await logActivity({ type: 'zealy', action: 'connection_tested', actor: getActor(req), source: 'crm_api', metadata: { ok: result.ok } });
+    apiSuccess(res, result, { extra: { result } });
+  }));
+
+  router.post('/zealy/sync', asyncRoute(async (req, res) => {
+    const result = await syncZealyLeaderboard({ publish: toBoolean(req.body.publish, false) });
+    await logActivity({ type: 'zealy', action: 'sync_requested', actor: getActor(req), source: 'crm_api', metadata: result });
+    apiSuccess(res, result, { extra: { result } });
+  }));
+
+  router.get('/zealy/leaderboard', asyncRoute(async (req, res) => {
+    const members = (await pool.query(`SELECT * FROM discord_zealy_members ORDER BY rank ASC NULLS LAST LIMIT $1`, [parsePositiveInt(req.query.limit, 25, 100)])).rows.map(serializeZealyMember);
+    const preview = await buildZealyLeaderboardMessage().catch(error => sanitizePublicErrorMessage(error));
+    apiSuccess(res, members, { total: members.length, extra: { members, preview } });
+  }));
+
+  router.post('/zealy/leaderboard/refresh', asyncRoute(async (req, res) => {
+    const result = await syncZealyLeaderboard({ publish: false });
+    apiSuccess(res, result, { extra: { result } });
+  }));
+
+  router.post('/zealy/leaderboard/publish', asyncRoute(async (req, res) => {
+    const result = await syncZealyLeaderboard({ publish: true });
+    apiSuccess(res, result, { extra: { result } });
+  }));
+
+  router.post('/zealy/leaderboard/recreate', asyncRoute(async (req, res) => {
+    const result = await publishZealyLeaderboard({ recreate: true });
+    apiSuccess(res, result, { extra: { result } });
+  }));
+
+  router.get('/zealy/templates', asyncRoute(async (req, res) => {
+    const result = await pool.query(`SELECT * FROM discord_zealy_templates ORDER BY event_type ASC, id ASC`);
+    const templates = result.rows.map(serializeZealyTemplate);
+    apiSuccess(res, templates, { total: templates.length, extra: { templates, variableHelpers: ZEALY_TEMPLATE_VARIABLES, eventTypes: ZEALY_EVENT_TYPES } });
+  }));
+
+  router.post('/zealy/templates', asyncRoute(async (req, res) => {
+    const body = req.body || {};
+    const result = await pool.query(
+      `INSERT INTO discord_zealy_templates (name, event_type, enabled, title_template, body_template, colour, image_url, thumbnail_url, footer_text, buttons, reactions, updated_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12) RETURNING *`,
+      [body.name || 'Custom Zealy template', body.eventType || 'XP_EARNED', body.enabled !== false, body.titleTemplate || 'Zealy update', body.bodyTemplate || '{{user_display}} earned {{formatted_xp_delta}} XP', body.colour || '#f35023', body.imageUrl || null, body.thumbnailUrl || null, body.footerText || null, JSON.stringify(body.buttons || []), JSON.stringify(body.reactions || []), getActor(req)]
+    );
+    apiSuccess(res, serializeZealyTemplate(result.rows[0]), { status: 201, extra: { template: serializeZealyTemplate(result.rows[0]) } });
+  }));
+
+  router.patch('/zealy/templates/:id', asyncRoute(async (req, res) => {
+    const body = req.body || {};
+    const current = await pool.query(`SELECT * FROM discord_zealy_templates WHERE id = $1`, [req.params.id]);
+    if (!current.rowCount) throw createApiError('ZEALY_TEMPLATE_NOT_FOUND', 'Zealy template not found.', 404);
+    const merged = { ...serializeZealyTemplate(current.rows[0]), ...body };
+    const result = await pool.query(
+      `UPDATE discord_zealy_templates SET name=$2,event_type=$3,enabled=$4,title_template=$5,body_template=$6,colour=$7,image_url=$8,thumbnail_url=$9,footer_text=$10,buttons=$11::jsonb,reactions=$12::jsonb,updated_by=$13,updated_at=NOW() WHERE id=$1 RETURNING *`,
+      [req.params.id, merged.name, merged.eventType, merged.enabled !== false, merged.titleTemplate, merged.bodyTemplate, merged.colour || '#f35023', merged.imageUrl || null, merged.thumbnailUrl || null, merged.footerText || null, JSON.stringify(merged.buttons || []), JSON.stringify(merged.reactions || []), getActor(req)]
+    );
+    apiSuccess(res, serializeZealyTemplate(result.rows[0]), { extra: { template: serializeZealyTemplate(result.rows[0]) } });
+  }));
+
+  router.delete('/zealy/templates/:id', asyncRoute(async (req, res) => {
+    const result = await pool.query(`DELETE FROM discord_zealy_templates WHERE id = $1 AND is_seeded = false`, [req.params.id]);
+    apiSuccess(res, { deleted: result.rowCount > 0 });
+  }));
+
+  router.post('/zealy/templates/:id/preview', asyncRoute(async (req, res) => {
+    const result = await pool.query(`SELECT * FROM discord_zealy_templates WHERE id = $1`, [req.params.id]);
+    if (!result.rowCount) throw createApiError('ZEALY_TEMPLATE_NOT_FOUND', 'Zealy template not found.', 404);
+    const sample = {
+      event_type: result.rows[0].event_type,
+      source: 'PREVIEW',
+      zealy_name: 'TraderTwo',
+      discord_username: 'TraderTwo',
+      xp_delta: 125,
+      current_xp: 4250,
+      rank_before: 12,
+      rank_after: 8,
+      quest_name: 'Complete onboarding',
+      reward_name: 'TTT reward',
+      metadata: { milestone: 1000 },
+      occurred_at: new Date(),
+    };
+    const values = zealyEventValues(sample);
+    apiSuccess(res, { title: renderZealyTemplateString(result.rows[0].title_template, values), body: renderZealyTemplateString(result.rows[0].body_template, values), values });
+  }));
+
+  router.post('/zealy/templates/:id/test-send', asyncRoute(async (req, res) => {
+    const settings = await getZealySettings();
+    const template = await pool.query(`SELECT * FROM discord_zealy_templates WHERE id = $1`, [req.params.id]);
+    if (!template.rowCount) throw createApiError('ZEALY_TEMPLATE_NOT_FOUND', 'Zealy template not found.', 404);
+    const event = await insertZealyEvent({
+      providerEventId: `test:${req.params.id}:${Date.now()}`,
+      eventType: template.rows[0].event_type,
+      source: 'TEST',
+      zealyUserId: 'test-user',
+      xpDelta: 125,
+      currentXp: 4250,
+      rankAfter: 8,
+      questName: 'Complete onboarding',
+      rewardName: 'TTT reward',
+      metadata: { zealyName: 'TraderTwo', milestone: 1000 },
+      occurredAt: new Date(),
+    });
+    const sent = await sendZealyEvent(event, { channelId: req.body.channelId || settings.rewardFeedChannelId });
+    apiSuccess(res, sent, { extra: { sent } });
+  }));
+
+  router.get('/zealy/events', asyncRoute(async (req, res) => {
+    const where = [];
+    const params = [];
+    if (req.query.eventType) { params.push(req.query.eventType); where.push(`event_type = $${params.length}`); }
+    if (req.query.status) { params.push(req.query.status); where.push(`status = $${params.length}`); }
+    if (req.query.source) { params.push(req.query.source); where.push(`source = $${params.length}`); }
+    if (req.query.search) { params.push(`%${String(req.query.search).toLowerCase()}%`); where.push(`(LOWER(COALESCE(quest_name,'')) LIKE $${params.length} OR LOWER(COALESCE(reward_name,'')) LIKE $${params.length} OR LOWER(COALESCE(zealy_user_id,'')) LIKE $${params.length})`); }
+    const limit = parsePositiveInt(req.query.limit, 50, 200);
+    params.push(limit);
+    const result = await pool.query(`SELECT * FROM discord_zealy_events ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY occurred_at DESC LIMIT $${params.length}`, params);
+    const events = result.rows.map(serializeZealyEvent);
+    apiSuccess(res, events, { total: events.length, extra: { events } });
+  }));
+
+  router.get('/zealy/events/:id', asyncRoute(async (req, res) => {
+    const result = await pool.query(`SELECT * FROM discord_zealy_events WHERE id = $1`, [req.params.id]);
+    if (!result.rowCount) throw createApiError('ZEALY_EVENT_NOT_FOUND', 'Zealy event not found.', 404);
+    apiSuccess(res, serializeZealyEvent(result.rows[0]), { extra: { event: serializeZealyEvent(result.rows[0]) } });
+  }));
+
+  router.post('/zealy/events/:id/retry', asyncRoute(async (req, res) => {
+    const result = await pool.query(`UPDATE discord_zealy_events SET status = 'PENDING', last_error = NULL, updated_at = NOW() WHERE id = $1 RETURNING *`, [req.params.id]);
+    if (!result.rowCount) throw createApiError('ZEALY_EVENT_NOT_FOUND', 'Zealy event not found.', 404);
+    const sent = await sendZealyEvent(result.rows[0]);
+    apiSuccess(res, sent, { extra: { sent } });
+  }));
+
+  router.post('/zealy/test-reward-event', asyncRoute(async (req, res) => {
+    const body = req.body || {};
+    const event = await insertZealyEvent({
+      providerEventId: `manual-test:${Date.now()}:${crypto.randomBytes(3).toString('hex')}`,
+      eventType: body.eventType || 'XP_EARNED',
+      source: 'TEST',
+      zealyUserId: body.zealyUserId || 'test-user',
+      discordUserId: body.discordUserId || null,
+      xpDelta: Number(body.xpDelta || 125),
+      currentXp: Number(body.currentXp || 4250),
+      rankAfter: Number(body.rank || 8),
+      questName: body.questName || 'Complete onboarding',
+      rewardName: body.rewardName || null,
+      metadata: { zealyName: body.zealyName || 'TraderTwo', milestone: body.milestone || 1000 },
+      occurredAt: new Date(),
+    });
+    const sent = await sendZealyEvent(event, { channelId: body.channelId || null });
+    apiSuccess(res, { event: serializeZealyEvent(event), sent }, { status: 201, extra: { event: serializeZealyEvent(event), sent } });
+  }));
+
   router.get('/payout-feed/weeks/current', asyncRoute(async (req, res) => {
     const settings = await getPayoutFeedSettings();
     const { weekStart } = localWeekRange(new Date(), settings.timezone);
@@ -7423,6 +8702,7 @@ function startCRMStatsServer() {
 async function startBot() {
   await initDB();
   startCRMStatsServer();
+  startZealySchedulers();
   await registerCommands();
   await client.login(DISCORD_TOKEN);
 }
@@ -7455,6 +8735,17 @@ module.exports = {
   discordFlagCode,
   renderPayoutTemplate,
   renderUniformPayoutMessage,
+  normalizeZealySubdomain,
+  normalizeZealyLeaderboard,
+  detectZealyDeltaEvents,
+  detectZealyMilestones,
+  renderZealyTemplateString,
+  zealyEventValues,
+  zealyCapabilityMatrix,
+  verifyZealyWebhookSecret,
+  ZEALY_DEFAULT_TEMPLATES,
+  ZEALY_DEFAULT_SETTINGS,
+  ZEALY_DEFAULT_MILESTONES,
   normalizePayoutSettings,
   localDateParts,
   DEFAULT_PAYOUT_SETTINGS,
