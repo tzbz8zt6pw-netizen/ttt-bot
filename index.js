@@ -6068,6 +6068,165 @@ async function getAnnouncement(id) {
   };
 }
 
+function serializeDmCampaign(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    announcementId: row.announcement_id,
+    name: row.name,
+    status: row.status,
+    totalCount: Number(row.total_count || 0),
+    successCount: Number(row.success_count || 0),
+    failureCount: Number(row.failure_count || 0),
+    pendingCount: Math.max(0, Number(row.total_count || 0) - Number(row.success_count || 0) - Number(row.failure_count || 0)),
+    lastProcessedRecipient: row.last_processed_recipient || null,
+    metadata: row.metadata || {},
+    createdAt: row.created_at,
+    startedAt: row.started_at || null,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at || null,
+  };
+}
+
+function serializeDmDelivery(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    campaignId: row.campaign_id,
+    discordUserId: row.discord_user_id,
+    status: row.status,
+    errorMessage: row.error_message || null,
+    username: row.username || null,
+    displayName: row.display_name || null,
+    avatarUrl: row.avatar_url || null,
+    createdAt: row.created_at,
+  };
+}
+
+function channelStatsFromAnnouncementLogs(rows) {
+  let postedCount = 0;
+  let failedCount = 0;
+  const posts = [];
+  const timeline = [];
+
+  for (const row of rows) {
+    const metadata = parseActivityMetadata(row.metadata);
+    const channelResult = metadata.channelResult || metadata.result?.channelResult || {};
+    const summary = metadata.summary || {};
+    const postRows = Array.isArray(channelResult.posts)
+      ? channelResult.posts
+      : Array.isArray(metadata.posts)
+        ? metadata.posts
+        : [];
+    const rowPosted = Number(channelResult.postedCount ?? summary.postedCount ?? postRows.length ?? 0) || 0;
+    const rowFailed = Number(channelResult.failedCount ?? summary.failedCount ?? 0) || 0;
+
+    postedCount += rowPosted;
+    failedCount += rowFailed;
+    for (const post of postRows) {
+      posts.push({
+        channelId: post.channelId || post.channel_id || null,
+        messageId: post.messageId || post.message_id || null,
+        status: 'sent',
+        createdAt: row.created_at,
+      });
+    }
+
+    if (Array.isArray(metadata.timeline)) {
+      for (const step of metadata.timeline) {
+        timeline.push({
+          label: step.label || step.step || row.action,
+          status: step.status || (row.error_message ? 'failed' : 'completed'),
+          detail: step.detail || step.message || row.error_message || null,
+          at: row.created_at,
+        });
+      }
+    } else {
+      timeline.push({
+        label: row.action === 'send_failed' ? 'Announcement failed' : 'Announcement sent',
+        status: row.error_message ? 'failed' : 'completed',
+        detail: row.error_message || `${rowPosted} channel post(s), ${rowFailed} failure(s)`,
+        at: row.created_at,
+      });
+    }
+  }
+
+  return { postedCount, failedCount, posts, timeline };
+}
+
+async function getAnnouncementStats(id, { deliveryLimit = 50 } = {}) {
+  const [campaignResult, deliveriesResult, activityResult] = await Promise.all([
+    pool.query(
+      `
+      SELECT *
+      FROM discord_dm_campaigns
+      WHERE announcement_id = $1
+      ORDER BY created_at DESC
+      `,
+      [id]
+    ),
+    pool.query(
+      `
+      SELECT d.*, s.username, s.display_name, s.avatar_url
+      FROM discord_dm_deliveries d
+      JOIN discord_dm_campaigns c ON c.id = d.campaign_id
+      LEFT JOIN subscribers s ON s.user_id = d.discord_user_id
+      WHERE c.announcement_id = $1
+      ORDER BY d.created_at DESC
+      LIMIT $2
+      `,
+      [id, deliveryLimit]
+    ),
+    pool.query(
+      `
+      SELECT *
+      FROM discord_activity_logs
+      WHERE entity_type = 'announcement'
+        AND entity_id = $1
+        AND type = 'announcement'
+      ORDER BY created_at ASC
+      `,
+      [String(id)]
+    ),
+  ]);
+
+  const campaigns = campaignResult.rows.map(serializeDmCampaign).filter(Boolean);
+  const deliveries = deliveriesResult.rows.map(serializeDmDelivery).filter(Boolean);
+  const channelStats = channelStatsFromAnnouncementLogs(activityResult.rows);
+  const dmTotal = campaigns.reduce((sum, campaign) => sum + campaign.totalCount, 0);
+  const dmSuccess = campaigns.reduce((sum, campaign) => sum + campaign.successCount, 0);
+  const dmFailure = campaigns.reduce((sum, campaign) => sum + campaign.failureCount, 0);
+  const dmPending = Math.max(0, dmTotal - dmSuccess - dmFailure);
+
+  const campaignTimeline = campaigns.map((campaign) => ({
+    label: `DM campaign ${campaign.id}`,
+    status: campaign.status,
+    detail: `${campaign.successCount} sent, ${campaign.failureCount} failed, ${campaign.pendingCount} pending`,
+    at: campaign.completedAt || campaign.updatedAt || campaign.createdAt,
+  }));
+
+  return {
+    channel: {
+      selectedCount: 0,
+      postedCount: channelStats.postedCount,
+      failedCount: channelStats.failedCount,
+      posts: channelStats.posts,
+    },
+    dm: {
+      campaignCount: campaigns.length,
+      totalCount: dmTotal,
+      successCount: dmSuccess,
+      failureCount: dmFailure,
+      pendingCount: dmPending,
+      campaigns,
+      deliveries,
+    },
+    timeline: [...channelStats.timeline, ...campaignTimeline]
+      .filter(Boolean)
+      .sort((a, b) => new Date(a.at || 0).getTime() - new Date(b.at || 0).getTime()),
+  };
+}
+
 async function sendAnnouncementById(id, req) {
   const announcement = await getAnnouncement(id);
   if (!announcement) {
@@ -7032,7 +7191,27 @@ function startCRMStatsServer() {
       [limit, offset]
     );
     const countResult = await pool.query(`SELECT COUNT(*)::int AS count FROM discord_announcements`);
-    const announcements = result.rows.map(row => ({
+    const campaignStats = await pool.query(
+      `
+      SELECT announcement_id,
+             COUNT(*)::int AS campaign_count,
+             COALESCE(SUM(total_count), 0)::int AS dm_total,
+             COALESCE(SUM(success_count), 0)::int AS dm_success,
+             COALESCE(SUM(failure_count), 0)::int AS dm_failure
+      FROM discord_dm_campaigns
+      WHERE announcement_id = ANY($1::bigint[])
+      GROUP BY announcement_id
+      `,
+      [result.rows.map(row => row.id)]
+    );
+    const campaignStatsByAnnouncement = new Map(campaignStats.rows.map(row => [String(row.announcement_id), row]));
+    const announcements = result.rows.map(row => {
+      const stats = campaignStatsByAnnouncement.get(String(row.id)) || {};
+      const channelIds = Array.isArray(row.payload?.channelIds) ? row.payload.channelIds : [];
+      const dmTotal = Number(stats.dm_total || 0);
+      const dmSuccess = Number(stats.dm_success || 0);
+      const dmFailure = Number(stats.dm_failure || 0);
+      return {
         id: row.id,
         title: row.title,
         message: row.message,
@@ -7040,10 +7219,19 @@ function startCRMStatsServer() {
         payload: row.payload,
         status: row.status,
         lastError: row.last_error,
+        stats: {
+          channelSelectedCount: channelIds.length,
+          dmCampaignCount: Number(stats.campaign_count || 0),
+          dmTotal,
+          dmSuccess,
+          dmFailure,
+          dmPending: Math.max(0, dmTotal - dmSuccess - dmFailure),
+        },
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         sentAt: row.sent_at,
-      }));
+      };
+    });
     apiSuccess(res, announcements, {
       page,
       pageSize: limit,
@@ -7065,6 +7253,11 @@ function startCRMStatsServer() {
     if (!announcement) {
       throw createApiError('ANNOUNCEMENT_NOT_FOUND', 'Announcement not found', 404);
     }
+    const stats = await getAnnouncementStats(req.params.id, {
+      deliveryLimit: parsePositiveInt(req.query.deliveryLimit, 50, 500),
+    });
+    stats.channel.selectedCount = Array.isArray(announcement.channelIds) ? announcement.channelIds.length : 0;
+    announcement.stats = stats;
     apiSuccess(res, announcement, { extra: { announcement } });
   }));
 
