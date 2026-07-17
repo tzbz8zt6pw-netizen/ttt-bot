@@ -45,7 +45,8 @@ const LOGO_URL =
   'https://tttmarkets.com/wp-content/uploads/2025/09/cropped-TTT-Logo.png';
 const WEBSITE_URL = process.env.WEBSITE_URL || 'https://tttmarkets.com';
 const AUTO_POST_SHORTS =
-  String(process.env.AUTO_POST_SHORTS || 'false').toLowerCase() === 'true';
+  String(process.env.AUTO_POST_SHORTS || 'true').toLowerCase() !== 'false';
+const YOUTUBE_ADVISORY_LOCK_KEY = 4771029783;
 
 const OWNER_USER_ID = process.env.OWNER_USER_ID;
 const CEO_USER_ID = process.env.CEO_USER_ID;
@@ -1194,6 +1195,15 @@ async function initDB() {
   await ensureSetting('core', DEFAULT_CORE_SETTINGS, 'core');
   await ensureSetting('welcome', DEFAULT_WELCOME_SETTINGS, 'welcome');
   await ensureSetting('youtube', DEFAULT_YOUTUBE_SETTINGS, 'youtube');
+  await pool.query(
+    `
+    UPDATE discord_settings
+    SET value = jsonb_set(value, '{autoPostShorts}', 'true'::jsonb, true),
+        updated_at = NOW()
+    WHERE key = 'youtube'
+      AND COALESCE((value->>'autoPostShorts')::boolean, false) = false
+    `
+  );
   await ensureSetting('channel_mappings', DEFAULT_CHANNEL_MAPPINGS, 'mappings');
   await ensureSetting('role_mappings', DEFAULT_ROLE_MAPPINGS, 'mappings');
   await seedNewsTemplates();
@@ -1384,6 +1394,42 @@ async function setAppState(key, value) {
     `,
     [key, value]
   );
+}
+
+async function getJsonAppState(key, fallback) {
+  const raw = await getAppState(key);
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    return fallback;
+  }
+}
+
+async function setJsonAppState(key, value) {
+  await setAppState(key, JSON.stringify(value));
+}
+
+async function acquireAdvisoryLock(key) {
+  const dbClient = await pool.connect();
+  try {
+    const result = await dbClient.query(`SELECT pg_try_advisory_lock($1) AS locked`, [key]);
+    if (result.rows[0]?.locked) return dbClient;
+    dbClient.release();
+    return null;
+  } catch (error) {
+    dbClient.release();
+    throw error;
+  }
+}
+
+async function releaseAdvisoryLock(dbClient, key) {
+  if (!dbClient) return;
+  try {
+    await dbClient.query(`SELECT pg_advisory_unlock($1)`, [key]);
+  } finally {
+    dbClient.release();
+  }
 }
 
 async function incrementStats(patch) {
@@ -3939,27 +3985,40 @@ function normalizeZealyList(payload) {
   if (Array.isArray(payload)) return payload;
   if (Array.isArray(payload?.items)) return payload.items;
   if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.data?.items)) return payload.data.items;
+  if (Array.isArray(payload?.data?.results)) return payload.data.results;
+  if (Array.isArray(payload?.data?.leaderboard)) return payload.data.leaderboard;
+  if (Array.isArray(payload?.data?.members)) return payload.data.members;
+  if (Array.isArray(payload?.data?.users)) return payload.data.users;
   if (Array.isArray(payload?.leaderboard)) return payload.leaderboard;
+  if (Array.isArray(payload?.leaderboard?.items)) return payload.leaderboard.items;
+  if (Array.isArray(payload?.leaderboard?.data)) return payload.leaderboard.data;
+  if (Array.isArray(payload?.leaderboard?.results)) return payload.leaderboard.results;
   if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(payload?.members)) return payload.members;
+  if (Array.isArray(payload?.users)) return payload.users;
+  if (Array.isArray(payload?.rankings)) return payload.rankings;
   return [];
 }
 
 function normalizeZealyLeaderboard(payload, { sprint = false } = {}) {
   return normalizeZealyList(payload).map((item, index) => {
-    const zealyUserId = String(item.userId || item.id || item.user?.id || item.member?.id || '').trim();
-    const discordUserId = String(item.discordId || item.discord?.id || item.user?.discord?.id || '').trim() || null;
-    const discordUsername = item.discordHandle || item.discord?.handle || item.user?.discord?.handle || null;
-    const xp = Number(item.xp ?? item.score ?? item.points ?? 0);
+    const user = item.user || item.member || item.account || item.profile || {};
+    const discord = item.discord || user.discord || item.socials?.discord || {};
+    const zealyUserId = String(item.userId || item.zealyUserId || item.id || user.id || user.userId || '').trim();
+    const discordUserId = String(item.discordId || item.discordUserId || discord.id || user.discordId || '').trim() || null;
+    const discordUsername = item.discordHandle || item.discordUsername || discord.handle || discord.username || user.discordHandle || user.discordUsername || null;
+    const xp = Number(item.xp ?? item.score ?? item.points ?? item.totalXp ?? item.totalXP ?? item.experience ?? user.xp ?? 0);
     return {
       zealyUserId,
-      zealyName: item.name || item.user?.name || item.username || null,
+      zealyName: item.name || item.zealyName || user.name || item.username || user.username || null,
       discordUserId,
       discordUsername,
       xp: Number.isFinite(xp) ? xp : 0,
-      rank: Number(item.rank || index + 1),
+      rank: Number(item.rank || item.position || item.place || index + 1),
       sprintXp: sprint ? (Number.isFinite(xp) ? xp : 0) : null,
-      sprintRank: sprint ? Number(item.rank || index + 1) : null,
-      avatarUrl: item.avatar || item.avatarUrl || item.user?.avatar || null,
+      sprintRank: sprint ? Number(item.rank || item.position || item.place || index + 1) : null,
+      avatarUrl: item.avatar || item.avatarUrl || user.avatar || user.avatarUrl || null,
       rawPayload: item,
     };
   }).filter(row => row.zealyUserId);
@@ -3969,7 +4028,12 @@ async function fetchZealyLeaderboard({ sprintId = null, limit = 25 } = {}) {
   const query = { page: 0, limit };
   if (sprintId) query.sprintId = sprintId;
   const result = await zealyFetch('/public/communities/{subdomain}/leaderboard', { query });
-  return normalizeZealyLeaderboard(result.json, { sprint: Boolean(sprintId) });
+  let rows = normalizeZealyLeaderboard(result.json, { sprint: Boolean(sprintId) });
+  if (!rows.length) {
+    const fallback = await zealyFetch('/public/communities/{subdomain}/leaderboard', { query: { ...query, page: 1 } }).catch(() => null);
+    if (fallback) rows = normalizeZealyLeaderboard(fallback.json, { sprint: Boolean(sprintId) });
+  }
+  return rows;
 }
 
 async function fetchZealySprints({ onlyCurrent = true } = {}) {
@@ -4133,7 +4197,7 @@ function serializeZealyMember(row) {
   };
 }
 
-async function upsertZealyMembers(members, { sprint = false } = {}) {
+async function upsertZealyMembers(members, { sprint = false, settings = ZEALY_DEFAULT_SETTINGS } = {}) {
   const previous = new Map((await pool.query(`SELECT * FROM discord_zealy_members`)).rows.map(row => [row.zealy_user_id, row]));
   const events = [];
   for (const member of members) {
@@ -4158,7 +4222,7 @@ async function upsertZealyMembers(members, { sprint = false } = {}) {
       `,
       [member.zealyUserId, member.zealyName, member.discordUserId, member.discordUsername, member.xp, member.rank, member.sprintXp, member.sprintRank, member.avatarUrl, JSON.stringify(member.rawPayload || {})]
     );
-    events.push(...detectZealyDeltaEvents(before, member));
+    events.push(...detectZealyDeltaEvents(before, member, settings));
   }
   return events;
 }
@@ -4295,6 +4359,21 @@ async function buildZealyLeaderboardMessage(settings = null) {
 async function publishZealyLeaderboard({ recreate = false } = {}) {
   const settings = await getZealySettings();
   if (!settings.leaderboardChannelId) throw createApiError('ZEALY_LEADERBOARD_CHANNEL_REQUIRED', 'Zealy leaderboard channel is not configured.', 400);
+  const cachedMembers = await pool.query(`SELECT COUNT(*)::int AS count FROM discord_zealy_members WHERE rank IS NOT NULL`);
+  if (!Number(cachedMembers.rows[0]?.count || 0)) {
+    const members = await fetchZealyLeaderboard({ limit: Math.max(25, settings.leaderboardLimit || 10) });
+    if (members.length) {
+      await upsertZealyMembers(members, { sprint: false, settings });
+      await pool.query(
+        `INSERT INTO discord_zealy_snapshots (snapshot_type, payload_hash, raw_payload, member_count) VALUES ('LEADERBOARD', $1, $2::jsonb, $3) ON CONFLICT DO NOTHING`,
+        [safeJsonHash(members), JSON.stringify(members), members.length]
+      );
+    }
+  }
+  const readyMembers = await pool.query(`SELECT COUNT(*)::int AS count FROM discord_zealy_members WHERE rank IS NOT NULL`);
+  if (!Number(readyMembers.rows[0]?.count || 0)) {
+    throw createApiError('ZEALY_LEADERBOARD_EMPTY', 'Zealy returned no leaderboard members to publish. Run Test connection and confirm the community subdomain/API key.', 502);
+  }
   const channel = await fetchTextChannel(settings.leaderboardChannelId);
   const content = await buildZealyLeaderboardMessage(settings);
   let message = null;
@@ -4310,8 +4389,9 @@ async function publishZealyLeaderboard({ recreate = false } = {}) {
     message = await channel.send({ content, allowedMentions: { parse: [] } });
   }
   await pool.query(`UPDATE discord_zealy_settings SET leaderboard_message_id = $1, last_sync_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = 1`, [message.id]);
-  await logActivity({ type: 'zealy', action: 'leaderboard_published', source: 'worker', metadata: { channelId: channel.id, messageId: message.id } });
-  return { messageId: message.id, channelId: channel.id, content };
+  const memberCount = await pool.query(`SELECT COUNT(*)::int AS count FROM discord_zealy_members WHERE rank IS NOT NULL`);
+  await logActivity({ type: 'zealy', action: 'leaderboard_published', source: 'worker', metadata: { channelId: channel.id, messageId: message.id, memberCount: memberCount.rows[0]?.count || 0 } });
+  return { messageId: message.id, channelId: channel.id, content, memberCount: memberCount.rows[0]?.count || 0 };
 }
 
 async function syncZealyLeaderboard({ publish = false } = {}) {
@@ -4321,10 +4401,10 @@ async function syncZealyLeaderboard({ publish = false } = {}) {
     const settings = await getZealySettings();
     const currentSprint = settings.leaderboardIncludeSprint ? (await fetchZealySprints({ onlyCurrent: true }).catch(() => []))[0] : null;
     const members = await fetchZealyLeaderboard({ limit: Math.max(25, settings.leaderboardLimit || 10) });
-    const events = await upsertZealyMembers(members, { sprint: false });
+    const events = await upsertZealyMembers(members, { sprint: false, settings });
     if (currentSprint?.id) {
       const sprintMembers = await fetchZealyLeaderboard({ sprintId: currentSprint.id, limit: Math.max(25, settings.leaderboardLimit || 10) }).catch(() => []);
-      await upsertZealyMembers(sprintMembers, { sprint: true });
+      await upsertZealyMembers(sprintMembers, { sprint: true, settings });
     }
     await pool.query(
       `INSERT INTO discord_zealy_snapshots (snapshot_type, payload_hash, raw_payload, member_count) VALUES ('LEADERBOARD', $1, $2::jsonb, $3) ON CONFLICT DO NOTHING`,
@@ -4336,9 +4416,9 @@ async function syncZealyLeaderboard({ publish = false } = {}) {
       if (saved) inserted += 1;
     }
     await pool.query(`UPDATE discord_zealy_settings SET last_sync_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = 1`);
-    if (publish || settings.leaderboardEnabled) await publishZealyLeaderboard();
+    const publishResult = publish || settings.leaderboardEnabled ? await publishZealyLeaderboard() : null;
     if (settings.rewardFeedEnabled) await processPendingZealyEvents();
-    return { synced: true, members: members.length, eventsDetected: inserted, currentSprint };
+    return { synced: true, members: members.length, eventsDetected: inserted, currentSprint, publishResult };
   } catch (error) {
     await pool.query(`UPDATE discord_zealy_settings SET last_error = $1, updated_at = NOW() WHERE id = 1`, [sanitizePublicErrorMessage(error)]);
     throw error;
@@ -5427,12 +5507,48 @@ async function postYoutubeVideo(video) {
     totalChannelPosts: postedCount,
     totalChannelFailures: failedCount,
   });
-  await setAppState('lastYoutubePostAt', new Date().toISOString());
+  if (postedCount > 0) await setAppState('lastYoutubePostAt', new Date().toISOString());
+  return { postedCount, failedCount, channelIds, videoId: video.id || null };
+}
+
+async function getPostedYoutubeVideoIds() {
+  const state = await getJsonAppState('postedYoutubeVideoIds', []);
+  return new Set(Array.isArray(state) ? state.map(String).filter(Boolean) : []);
+}
+
+async function rememberPostedYoutubeVideoId(videoId) {
+  if (!videoId) return;
+  const ids = await getPostedYoutubeVideoIds();
+  ids.add(String(videoId));
+  await setJsonAppState('postedYoutubeVideoIds', Array.from(ids).slice(-250));
+}
+
+async function hasYoutubeVideoBeenPosted(videoId) {
+  if (!videoId) return false;
+  const ids = await getPostedYoutubeVideoIds();
+  if (ids.has(String(videoId))) return true;
+  const result = await pool.query(
+    `
+    SELECT 1
+    FROM discord_activity_logs
+    WHERE type = 'youtube'
+      AND action = 'posted'
+      AND entity_id = $1
+    LIMIT 1
+    `,
+    [String(videoId)]
+  );
+  return result.rowCount > 0;
 }
 
 async function checkYoutubeFeed() {
   if (youtubeCheckRunning) {
     console.log('YouTube check skipped: previous check still running.');
+    return;
+  }
+  const lockClient = await acquireAdvisoryLock(YOUTUBE_ADVISORY_LOCK_KEY).catch(() => null);
+  if (!lockClient) {
+    console.log('YouTube check skipped: another worker holds the posting lock.');
     return;
   }
   youtubeCheckRunning = true;
@@ -5469,24 +5585,44 @@ async function checkYoutubeFeed() {
       unseenItems.push({ ...item, videoId });
     }
 
-    await setAppState('lastVideoId', newestVideoId);
-
-    const video = unseenItems.find(item => settings.autoPostShorts || !looksLikeShort(item));
+    const video = unseenItems.find(item => settings.autoPostShorts !== false || !looksLikeShort(item));
     if (video) {
-      await postYoutubeVideo({
+      if (await hasYoutubeVideoBeenPosted(video.videoId)) {
+        await rememberPostedYoutubeVideoId(video.videoId);
+        await setAppState('lastVideoId', newestVideoId);
+        await logActivity({
+          type: 'youtube',
+          action: 'duplicate_skipped',
+          source: 'bot',
+          entityType: 'youtube_video',
+          entityId: video.videoId,
+          metadata: { title: video.title, link: video.link },
+        });
+        console.log(`Skipped duplicate YouTube video: ${video.videoId}.`);
+        return;
+      }
+      const postResult = await postYoutubeVideo({
         id: video.videoId,
         title: video.title,
         link: video.link,
         thumbnail: getYoutubeThumbnail(video.videoId),
       });
-      console.log(`Posted newest YouTube video: ${video.videoId}. Skipped ${Math.max(0, unseenItems.length - 1)} older unseen item(s).`);
+      if (postResult.postedCount > 0) {
+        await rememberPostedYoutubeVideoId(video.videoId);
+        await setAppState('lastVideoId', newestVideoId);
+        console.log(`Posted newest YouTube video: ${video.videoId}. Skipped ${Math.max(0, unseenItems.length - 1)} older unseen item(s).`);
+      } else {
+        console.log(`YouTube video ${video.videoId} was not marked seen because no Discord channel post succeeded.`);
+      }
     } else {
+      await setAppState('lastVideoId', newestVideoId);
       console.log(`No eligible YouTube video to post. Marked newest seen item: ${newestVideoId}.`);
     }
   } catch (error) {
     console.error('YouTube check failed:', error.message);
   } finally {
     youtubeCheckRunning = false;
+    await releaseAdvisoryLock(lockClient, YOUTUBE_ADVISORY_LOCK_KEY);
   }
 }
 

@@ -42,6 +42,32 @@ test('normalizes all-time leaderboard records and linked Discord identity', () =
   assert.equal(rows[1].discordUsername, 'trader.two');
 });
 
+test('normalizes nested Zealy leaderboard response shapes', () => {
+  const rows = normalizeZealyLeaderboard({
+    leaderboard: {
+      items: [
+        {
+          user: {
+            id: 'nested-1',
+            name: 'Nested Trader',
+            discord: { id: '999', username: 'nested_discord' },
+            avatarUrl: 'https://example.com/avatar.png',
+          },
+          totalXp: 4200,
+          position: 2,
+        },
+      ],
+    },
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].zealyUserId, 'nested-1');
+  assert.equal(rows[0].zealyName, 'Nested Trader');
+  assert.equal(rows[0].discordUserId, '999');
+  assert.equal(rows[0].discordUsername, 'nested_discord');
+  assert.equal(rows[0].xp, 4200);
+  assert.equal(rows[0].rank, 2);
+});
+
 test('detects XP earned, rank movement and top-ten entry from snapshots', () => {
   const before = { zealy_user_id: 'u1', xp: 90, rank: 12, discord_user_id: '123' };
   const after = { zealyUserId: 'u1', zealyName: 'TraderOne', discordUserId: '123', xp: 260, rank: 8 };
