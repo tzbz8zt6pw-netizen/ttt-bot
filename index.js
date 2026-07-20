@@ -6536,23 +6536,24 @@ async function createAnnouncement(body, req) {
 }
 
 function normalizeManagedPayload(body) {
-  const channelId = requireDiscordId(body.channelId || body.discordChannelId, 'Discord channel ID');
+  const cleanOptional = (value) => String(value || '').trim() === '-' ? '' : value;
+  const channelId = requireDiscordId(body.channelId || body.discordChannelId || body.payload?.channelId || body.payload?.discordChannelId, 'Discord channel ID');
   const contentBlocks = sanitizeManagedBlocks(body.contentBlocks || body.blocks || body.payload?.contentBlocks || []);
   const payload = {
-    internalName: String(body.internalName || body.name || '').trim(),
+    internalName: String(body.internalName || body.name || body.payload?.internalName || body.payload?.name || '').trim(),
     channelId,
     messageId: body.messageId || body.discordMessageId || null,
     status: body.status || 'draft',
     displayOrder: Number.parseInt(body.displayOrder || 0, 10) || 0,
     templateId: null,
-    title: body.title || body.payload?.title || body.internalName || 'TTT Markets',
-    description: body.description || body.payload?.description || '',
+    title: cleanOptional(body.title || body.payload?.title || body.internalName || 'TTT Markets'),
+    description: cleanOptional(body.description || body.payload?.description || ''),
     content: body.content || body.payload?.content || '',
     fields: body.fields || body.payload?.fields || [],
-    imageUrl: body.imageUrl || body.image || body.payload?.imageUrl || null,
-    thumbnail: body.thumbnail || body.payload?.thumbnail || null,
-    footer: body.footer || body.payload?.footer || BRAND_FOOTER,
-    embedColor: body.embedColor || body.color || body.payload?.embedColor || BRAND_COLOR,
+    imageUrl: cleanOptional(body.imageUrl || body.image || body.payload?.imageUrl || body.payload?.image) || null,
+    thumbnail: cleanOptional(body.thumbnail || body.payload?.thumbnail) || null,
+    footer: cleanOptional(body.footer ?? body.payload?.footer ?? BRAND_FOOTER),
+    embedColor: body.embedColor || body.embedColour || body.color || body.payload?.embedColor || body.payload?.embedColour || BRAND_COLOR,
     buttons: sanitizeButtons(body.buttons || body.payload?.buttons || [], { dropInvalid: true }),
     contentBlocks,
     reactions: sanitizeReactions(body.reactions || body.payload?.reactions, DEFAULT_MANAGED_REACTIONS).slice(0, 10),
