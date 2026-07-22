@@ -133,17 +133,17 @@ test('uses countries, flags and display names in each payout', () => {
   assert(plan.items.every(item => ['GB', 'AE'].includes(item.countryCode)));
   assert(plan.items.every(item => item.flag === flagFromCountryCode(item.countryCode)));
   assert(plan.items.every(item => item.displayName && !item.message.includes('{{')));
-  assert(plan.items.every(item => /^An TTT Trader from :flag_[a-z]{2}: just secured a [£$€]?\d+\.\d{3} reward! :moneybag:$/.test(item.message)));
+  assert(plan.items.every(item => /^An TTT Trader from :flag_[a-z]{2}: just secured a [£$€]?\d+\.\d{2} reward! :moneybag:$/.test(item.message)));
 });
 
 test('formats amounts and renders payout templates safely', () => {
   assert.strictEqual(formatPayoutAmount(1200, 'USD'), '$1,200');
-  assert.strictEqual(formatPayoutRewardAmount(7226.208, 'USD'), '$7226.208');
+  assert.strictEqual(formatPayoutRewardAmount(7226.208, 'USD'), '$7226.21');
   assert.strictEqual(flagFromCountryCode('GB'), '🇬🇧');
   assert.strictEqual(discordFlagCode('ES'), ':flag_es:');
   assert.strictEqual(
     renderUniformPayoutMessage({ country_code: 'ES', amount: 7226.208, currency: 'USD' }),
-    'An TTT Trader from :flag_es: just secured a $7226.208 reward! :moneybag:'
+    'An TTT Trader from :flag_es: just secured a $7226.21 reward! :moneybag:'
   );
   assert.strictEqual(
     renderPayoutTemplate('Paid {{formatted_amount}} to {{flag}} {{display_name}}', {

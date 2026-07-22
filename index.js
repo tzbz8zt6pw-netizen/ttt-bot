@@ -3143,7 +3143,7 @@ function formatPayoutRewardAmount(amount, currency = 'USD') {
   const symbolMap = { USD: '$', GBP: '£', EUR: '€' };
   const safeCurrency = String(currency || 'USD').toUpperCase();
   const symbol = symbolMap[safeCurrency] || `${safeCurrency} `;
-  return `${symbol}${value.toFixed(3)}`;
+  return `${symbol}${value.toFixed(2)}`;
 }
 
 function payoutTemplateValues(row = {}) {
@@ -8692,6 +8692,7 @@ function startCRMStatsServer() {
       amount: req.body.amount || 725,
       currency: req.body.currency || 'USD',
       formatted_amount: formatPayoutAmount(req.body.amount || 725, req.body.currency || 'USD'),
+      reward_amount: formatPayoutRewardAmount(req.body.amount || 725, req.body.currency || 'USD'),
       country_code: req.body.countryCode || 'GB',
       country_name: payoutCountryName(req.body.countryCode || 'GB'),
     };
