@@ -6298,7 +6298,7 @@ function channelStatsFromAnnouncementLogs(rows) {
 }
 
 async function getAnnouncementStats(id, { deliveryLimit = 50 } = {}) {
-  const [campaignResult, deliveriesResult, activityResult] = await Promise.all([
+  const [campaignResult, deliveriesResult, deliveryReasonResult, deliveryStatusResult, activityResult] = await Promise.all([
     pool.query(
       `
       SELECT *
@@ -6322,6 +6322,35 @@ async function getAnnouncementStats(id, { deliveryLimit = 50 } = {}) {
     ),
     pool.query(
       `
+      SELECT
+        COALESCE(NULLIF(TRIM(d.error_message), ''), 'Unknown failure') AS reason,
+        COUNT(*)::int AS count,
+        MAX(d.created_at) AS last_seen_at
+      FROM discord_dm_deliveries d
+      JOIN discord_dm_campaigns c ON c.id = d.campaign_id
+      WHERE c.announcement_id = $1
+        AND LOWER(d.status) <> 'sent'
+      GROUP BY reason
+      ORDER BY count DESC, last_seen_at DESC
+      LIMIT 12
+      `,
+      [id]
+    ),
+    pool.query(
+      `
+      SELECT
+        LOWER(d.status) AS status,
+        COUNT(*)::int AS count
+      FROM discord_dm_deliveries d
+      JOIN discord_dm_campaigns c ON c.id = d.campaign_id
+      WHERE c.announcement_id = $1
+      GROUP BY LOWER(d.status)
+      ORDER BY count DESC
+      `,
+      [id]
+    ),
+    pool.query(
+      `
       SELECT *
       FROM discord_activity_logs
       WHERE entity_type = 'announcement'
@@ -6335,11 +6364,22 @@ async function getAnnouncementStats(id, { deliveryLimit = 50 } = {}) {
 
   const campaigns = campaignResult.rows.map(serializeDmCampaign).filter(Boolean);
   const deliveries = deliveriesResult.rows.map(serializeDmDelivery).filter(Boolean);
+  const failureReasons = deliveryReasonResult.rows.map(row => ({
+    reason: row.reason,
+    count: Number(row.count || 0),
+    lastSeenAt: row.last_seen_at || null,
+  }));
+  const statusBreakdown = deliveryStatusResult.rows.map(row => ({
+    status: row.status || 'unknown',
+    count: Number(row.count || 0),
+  }));
   const channelStats = channelStatsFromAnnouncementLogs(activityResult.rows);
   const dmTotal = campaigns.reduce((sum, campaign) => sum + campaign.totalCount, 0);
   const dmSuccess = campaigns.reduce((sum, campaign) => sum + campaign.successCount, 0);
   const dmFailure = campaigns.reduce((sum, campaign) => sum + campaign.failureCount, 0);
   const dmPending = Math.max(0, dmTotal - dmSuccess - dmFailure);
+  const attemptedCount = dmSuccess + dmFailure;
+  const successRate = dmTotal ? Math.round((dmSuccess / dmTotal) * 1000) / 10 : null;
 
   const campaignTimeline = campaigns.map((campaign) => ({
     label: `DM campaign ${campaign.id}`,
@@ -6361,6 +6401,10 @@ async function getAnnouncementStats(id, { deliveryLimit = 50 } = {}) {
       successCount: dmSuccess,
       failureCount: dmFailure,
       pendingCount: dmPending,
+      attemptedCount,
+      successRate,
+      failureReasons,
+      statusBreakdown,
       campaigns,
       deliveries,
     },
