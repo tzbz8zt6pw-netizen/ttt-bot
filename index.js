@@ -6135,12 +6135,13 @@ function normalizeAnnouncementPayload(body) {
     : String(value || '').split(/[\s,]+/).map(row => row.trim()).filter(Boolean);
   const channelIds = Array.isArray(body.channelIds)
     ? body.channelIds.map(id => normalizeDiscordId(id)).filter(Boolean)
-    : [];
+    : splitList(body.channelIds).map(id => normalizeDiscordId(id)).filter(Boolean);
   const mappedChannelKeys = splitList(body.mappedChannels || body.mappedChannelGroups || body.mappedChannelKeys)
     .filter(key => CHANNEL_MAPPING_KEYS.includes(key));
   const selectedSubscriberIds = splitList(body.selectedSubscriberIds)
     .map(id => normalizeDiscordId(id))
     .filter(Boolean);
+  const sendDm = toBoolean(body.sendToSubscribersByDm ?? body.sendSubscriberDms ?? body.sendDm, false) || selectedSubscriberIds.length > 0;
   const payload = {
     title: String(body.title || '').trim(),
     message: String(body.message || body.description || '').trim(),
@@ -6148,12 +6149,12 @@ function normalizeAnnouncementPayload(body) {
     thumbnail: body.thumbnail || null,
     channelIds,
     mappedChannelKeys,
-    sendDm: toBoolean(body.sendToSubscribersByDm ?? body.sendSubscriberDms ?? body.sendDm, false),
+    sendDm,
     selectedSubscriberIds,
     pingEveryone: toBoolean(body.pingEveryone, false),
-    buttons: sanitizeButtons(body.buttons || []),
+    buttons: sanitizeButtons(body.buttons || [], { dropInvalid: true }),
     embedColor: body.embedColor || body.color || BRAND_COLOR,
-    footer: body.footer || BRAND_FOOTER,
+    footer: Object.prototype.hasOwnProperty.call(body, 'footer') ? String(body.footer || '') : BRAND_FOOTER,
     reactions: sanitizeReactions(body.reactions, ANNOUNCE_REACTIONS),
     saveAsDraft: toBoolean(body.saveAsDraft, false),
     sendImmediately: toBoolean(body.sendImmediately, false),
@@ -6167,6 +6168,12 @@ function normalizeAnnouncementPayload(body) {
   if (!payload.message) {
     const error = new Error('Message is required');
     error.status = 400;
+    throw error;
+  }
+  if (payload.sendImmediately && !payload.saveAsDraft && !payload.channelIds.length && !payload.mappedChannelKeys.length && !payload.sendDm) {
+    const error = new Error('Choose at least one channel or subscriber DM destination before publishing.');
+    error.status = 400;
+    error.code = 'ANNOUNCEMENT_DESTINATION_REQUIRED';
     throw error;
   }
 
