@@ -39,8 +39,10 @@ let subscriberHydrationRunning = false;
 
 const BRAND_COLOR = 0xf35023;
 const BRAND_NAME = 'TTT Markets';
-const BRAND_FOOTER = 'TTT Markets • Official Alerts';
-const YT_FOOTER = 'TTT Markets • YouTube Alerts';
+const LEGACY_BRAND_FOOTER = 'TTT Markets • Official Alerts';
+const LEGACY_YT_FOOTER = 'TTT Markets • YouTube Alerts';
+const BRAND_FOOTER = String(process.env.DISCORD_DEFAULT_FOOTER_TEXT || '').trim();
+const YT_FOOTER = String(process.env.DISCORD_YOUTUBE_FOOTER_TEXT || '').trim();
 const LOGO_URL =
   'https://tttmarkets.com/wp-content/uploads/2025/09/cropped-TTT-Logo.png';
 const WEBSITE_URL = process.env.WEBSITE_URL || 'https://tttmarkets.com';
@@ -53,6 +55,21 @@ const CEO_USER_ID = process.env.CEO_USER_ID;
 const WUMIC_USER_ID = process.env.WUMIC_USER_ID;
 
 const VIP_USERS = [OWNER_USER_ID, CEO_USER_ID, WUMIC_USER_ID].filter(Boolean);
+
+function cleanEmbedFooterText(value) {
+  const text = String(value || '').trim();
+  if (!text || text === '-' || text === LEGACY_BRAND_FOOTER || text === LEGACY_YT_FOOTER) return '';
+  return text.slice(0, 2048);
+}
+
+function applyOptionalEmbedFooter(embed, footerText, options = {}) {
+  const text = cleanEmbedFooterText(footerText);
+  if (text) embed.setFooter({ text });
+  if (options.timestamp) {
+    embed.setTimestamp(options.timestamp === true ? new Date() : new Date(options.timestamp));
+  }
+  return embed;
+}
 
 const YT_REACTIONS = ['🎥', '🔥', '📈', '🚀', '💰', '👀', '📊', '⚡', '💎', '🧠', '📣', '📌'];
 const ANNOUNCE_REACTIONS = ['🔥', '📢', '🚀', '💰', '👀', '📣', '🎯', '💎', '⚡', '🪙', '📊', '📌', '🚨'];
@@ -2405,7 +2422,7 @@ function sanitizeNewsTemplatePayload(body = {}, existing = {}) {
     colour: body.colour || body.color || existing.colour || existing.color || '#f35023',
     imageUrl: body.imageUrl || body.image_url || existing.image_url || existing.imageUrl || null,
     thumbnailUrl: body.thumbnailUrl || body.thumbnail_url || existing.thumbnail_url || existing.thumbnailUrl || null,
-    footerText: body.footerText || body.footer_text || existing.footer_text || existing.footerText || BRAND_FOOTER,
+    footerText: cleanEmbedFooterText(body.footerText ?? body.footer_text ?? existing.footer_text ?? existing.footerText ?? BRAND_FOOTER),
     buttons: sanitizeButtons(body.buttons ?? existing.buttons ?? [], { allowMailto: true, dropInvalid: true }),
     reactions: sanitizeReactions(body.reactions ?? existing.reactions ?? DEFAULT_NEWS_REACTIONS, DEFAULT_NEWS_REACTIONS),
   };
@@ -2450,7 +2467,7 @@ async function seedNewsTemplates() {
         template.titleTemplate,
         template.bodyTemplate,
         template.colour,
-        BRAND_FOOTER,
+        cleanEmbedFooterText(BRAND_FOOTER),
         JSON.stringify([]),
         JSON.stringify(template.reactions || DEFAULT_NEWS_REACTIONS),
       ]
@@ -2816,9 +2833,8 @@ function buildNewsEmbed(templateRow, event, settings, extra = {}) {
   const embed = new EmbedBuilder()
     .setColor(parseColor(templateRow.colour, BRAND_COLOR))
     .setTitle(title || BRAND_NAME)
-    .setDescription(body)
-    .setFooter({ text: String(templateRow.footer_text || BRAND_FOOTER).slice(0, 2048), iconURL: LOGO_URL })
-    .setTimestamp();
+    .setDescription(body);
+  applyOptionalEmbedFooter(embed, templateRow.footer_text || BRAND_FOOTER);
   if (templateRow.image_url) embed.setImage(validateUrl(templateRow.image_url, 'News template image URL'));
   if (templateRow.thumbnail_url) embed.setThumbnail(validateUrl(templateRow.thumbnail_url, 'News template thumbnail URL'));
   return embed;
@@ -4449,9 +4465,8 @@ async function sendZealyEvent(eventRow, { channelId = null } = {}) {
   const embed = new EmbedBuilder()
     .setTitle(renderZealyTemplateString(template.title_template, values).slice(0, 256))
     .setDescription(renderZealyTemplateString(template.body_template, values).slice(0, 4096))
-    .setColor(parseHexColor(template.colour || '#f35023'))
-    .setTimestamp(new Date(eventRow.occurred_at || Date.now()));
-  if (template.footer_text) embed.setFooter({ text: renderZealyTemplateString(template.footer_text, values).slice(0, 2048) });
+    .setColor(parseHexColor(template.colour || '#f35023'));
+  if (template.footer_text) applyOptionalEmbedFooter(embed, renderZealyTemplateString(template.footer_text, values));
   if (template.thumbnail_url) embed.setThumbnail(template.thumbnail_url);
   if (template.image_url) embed.setImage(template.image_url);
   const message = await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
@@ -5126,9 +5141,8 @@ function buildPayloadEmbed(payload) {
   const embed = new EmbedBuilder()
     .setColor(parseColor(payload.embedColor || payload.color, BRAND_COLOR))
     .setTitle(String(payload.title || BRAND_NAME).slice(0, 256))
-    .setDescription(String(payload.message || payload.description || '').slice(0, 4096))
-    .setFooter({ text: String(payload.footer || BRAND_FOOTER).slice(0, 2048), iconURL: LOGO_URL })
-    .setTimestamp();
+    .setDescription(String(payload.message || payload.description || '').slice(0, 4096));
+  applyOptionalEmbedFooter(embed, payload.footer || BRAND_FOOTER);
 
   const imageUrl = payload.imageUrl || payload.image;
   if (imageUrl) embed.setImage(imageUrl);
@@ -5207,9 +5221,8 @@ function buildGenericEmbed({ title, message, imageUrl }) {
   const embed = new EmbedBuilder()
     .setColor(BRAND_COLOR)
     .setTitle(title)
-    .setDescription(message)
-    .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
-    .setTimestamp();
+    .setDescription(message);
+  applyOptionalEmbedFooter(embed, BRAND_FOOTER);
 
   if (imageUrl) {
     embed.setImage(imageUrl);
@@ -5219,16 +5232,16 @@ function buildGenericEmbed({ title, message, imageUrl }) {
 }
 
 function buildYoutubeEmbed(video) {
-  return new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setColor(BRAND_COLOR)
     .setTitle(video.title)
     .setURL(video.link)
     .setDescription(
       `🎥 **New Video Dropped**\n\nA new video has just landed on the **${BRAND_NAME}** YouTube channel.\n\n🔥 [Watch now →](${video.link})`
     )
-    .setImage(video.thumbnail)
-    .setFooter({ text: YT_FOOTER, iconURL: LOGO_URL })
-    .setTimestamp();
+    .setImage(video.thumbnail);
+  applyOptionalEmbedFooter(embed, YT_FOOTER);
+  return embed;
 }
 
 function buildWelcomeEmbed(member, settings = DEFAULT_WELCOME_SETTINGS, descriptionOverride = null) {
@@ -5241,9 +5254,8 @@ function buildWelcomeEmbed(member, settings = DEFAULT_WELCOME_SETTINGS, descript
   const embed = new EmbedBuilder()
     .setColor(BRAND_COLOR)
     .setTitle(renderTemplate(settings.embedTitle || `Welcome to ${BRAND_NAME}`, values))
-    .setDescription(renderTemplate(descriptionOverride || settings.description || DEFAULT_WELCOME_SETTINGS.description, values))
-    .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
-    .setTimestamp();
+    .setDescription(renderTemplate(descriptionOverride || settings.description || DEFAULT_WELCOME_SETTINGS.description, values));
+  applyOptionalEmbedFooter(embed, BRAND_FOOTER);
 
   if (settings.image) embed.setImage(settings.image);
   if (settings.thumbnail) embed.setThumbnail(settings.thumbnail);
@@ -6154,7 +6166,7 @@ function normalizeAnnouncementPayload(body) {
     pingEveryone: toBoolean(body.pingEveryone, false),
     buttons: sanitizeButtons(body.buttons || [], { dropInvalid: true }),
     embedColor: body.embedColor || body.color || BRAND_COLOR,
-    footer: Object.prototype.hasOwnProperty.call(body, 'footer') ? String(body.footer || '') : BRAND_FOOTER,
+    footer: cleanEmbedFooterText(Object.prototype.hasOwnProperty.call(body, 'footer') ? body.footer : BRAND_FOOTER),
     reactions: sanitizeReactions(body.reactions, ANNOUNCE_REACTIONS),
     saveAsDraft: toBoolean(body.saveAsDraft, false),
     sendImmediately: toBoolean(body.sendImmediately, false),
@@ -6603,7 +6615,7 @@ function normalizeManagedPayload(body) {
     fields: body.fields || body.payload?.fields || [],
     imageUrl: cleanOptional(body.imageUrl || body.image || body.payload?.imageUrl || body.payload?.image) || null,
     thumbnail: cleanOptional(body.thumbnail || body.payload?.thumbnail) || null,
-    footer: cleanOptional(body.footer ?? body.payload?.footer ?? BRAND_FOOTER),
+    footer: cleanEmbedFooterText(cleanOptional(body.footer ?? body.payload?.footer ?? BRAND_FOOTER)),
     embedColor: body.embedColor || body.embedColour || body.color || body.payload?.embedColor || body.payload?.embedColour || BRAND_COLOR,
     buttons: sanitizeButtons(body.buttons || body.payload?.buttons || [], { dropInvalid: true }),
     contentBlocks,
@@ -6647,7 +6659,7 @@ function serializeManagedPost(row) {
     imageUrl: payload.imageUrl || payload.image || null,
     image: payload.imageUrl || payload.image || null,
     thumbnail: payload.thumbnail || null,
-    footer: payload.footer || BRAND_FOOTER,
+    footer: cleanEmbedFooterText(payload.footer || BRAND_FOOTER),
     embedColour: payload.embedColour || payload.embedColor || BRAND_COLOR,
     embedColor: payload.embedColor || payload.embedColour || BRAND_COLOR,
     buttons: sanitizeButtons(payload.buttons || []),
@@ -7013,9 +7025,8 @@ client.on('interactionCreate', async interaction => {
       .setTitle('🔔 TTT Promo Alerts')
       .setDescription(
         `Join **5000+ traders** getting:\n\n• Promo codes\n• Limited-time discounts\n• Competitions & giveaways\n• Important updates\n\n⚡ Only subscribers receive certain drops first.`
-      )
-      .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
-      .setTimestamp();
+      );
+    applyOptionalEmbedFooter(embed, BRAND_FOOTER);
 
     await interaction.deferReply();
     await interaction.editReply({
@@ -7044,9 +7055,8 @@ client.on('interactionCreate', async interaction => {
           `Manual adds: **${stats.totalManualAdds}**\n` +
           `Manual removes: **${stats.totalManualRemoves}**\n` +
           `Last alert: **${stats.lastAlertAt || 'N/A'}**`
-      )
-      .setFooter({ text: BRAND_FOOTER, iconURL: LOGO_URL })
-      .setTimestamp();
+      );
+    applyOptionalEmbedFooter(embed, BRAND_FOOTER);
 
     await interaction.reply({
       embeds: [embed],
@@ -8110,7 +8120,7 @@ function startCRMStatsServer() {
           fields: payload.fields || [],
           imageUrl: payload.imageUrl || null,
           thumbnail: payload.thumbnail || null,
-          footer: payload.footer || BRAND_FOOTER,
+          footer: cleanEmbedFooterText(payload.footer || BRAND_FOOTER),
           embedColor: payload.embedColor || BRAND_COLOR,
           buttons,
           components: buildButtonRows(buttons),
