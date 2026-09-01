@@ -149,6 +149,16 @@ const DEFAULT_WELCOME_SETTINGS = {
   reactions: [],
 };
 
+const DEFAULT_TRADER_WELCOME_SETTINGS = {
+  enabled: false,
+  channelId: null,
+  traderChatChannelId: null,
+  welcomeMessageChannelId: null,
+  message: '',
+  mentionTemplate: '{mention}',
+  delayMs: 0,
+};
+
 const DEFAULT_SUBSCRIBER_DM_DESCRIPTION =
   `You’re now getting access to everything most traders miss.\n\n` +
   `Here’s what separates TTT from most prop firms:\n\n` +
@@ -1211,6 +1221,7 @@ async function initDB() {
 
   await ensureSetting('core', DEFAULT_CORE_SETTINGS, 'core');
   await ensureSetting('welcome', DEFAULT_WELCOME_SETTINGS, 'welcome');
+  await ensureSetting('traderWelcome', DEFAULT_TRADER_WELCOME_SETTINGS, 'traderWelcome');
   await ensureSetting('youtube', DEFAULT_YOUTUBE_SETTINGS, 'youtube');
   await pool.query(
     `
@@ -1891,6 +1902,52 @@ async function getSettingsByGroup(groupKey) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }));
+}
+
+function normalizeTraderWelcomeSettings(settings = {}) {
+  const channelId = String(
+    settings.channelId ||
+    settings.traderChatChannelId ||
+    settings.welcomeMessageChannelId ||
+    ''
+  ).trim() || null;
+
+  return {
+    ...DEFAULT_TRADER_WELCOME_SETTINGS,
+    ...settings,
+    enabled: Boolean(settings.enabled),
+    channelId,
+    traderChatChannelId: channelId,
+    welcomeMessageChannelId: channelId,
+    message: String(settings.message || '').trim(),
+    mentionTemplate: settings.mentionTemplate || '{mention}',
+    delayMs: Math.max(0, Math.min(Number(settings.delayMs || 0) || 0, 30000)),
+  };
+}
+
+async function getTraderWelcomeSettings() {
+  await ensureSetting('traderWelcome', DEFAULT_TRADER_WELCOME_SETTINGS, 'traderWelcome');
+  const named = await getSetting('traderWelcome', DEFAULT_TRADER_WELCOME_SETTINGS);
+  const groupRows = await getSettingsByGroup('traderWelcome');
+  const grouped = {};
+  for (const row of groupRows) {
+    if (row.key === 'traderWelcome' && row.value && typeof row.value === 'object') {
+      Object.assign(grouped, row.value);
+    } else {
+      grouped[row.key] = row.value;
+    }
+  }
+  return normalizeTraderWelcomeSettings({ ...named, ...grouped });
+}
+
+async function updateTraderWelcomeSettings(patch = {}) {
+  const next = normalizeTraderWelcomeSettings(patch);
+  if (next.channelId) next.channelId = requireDiscordId(next.channelId, 'Trader chat channel ID');
+  validateTextLength(next.message, 2000, 'Trader welcome message');
+  validateTextLength(next.mentionTemplate, 256, 'Trader welcome mention template');
+  await setSettings(next, 'traderWelcome');
+  await setSetting('traderWelcome', next, 'traderWelcome');
+  return next;
 }
 
 async function getChannelMappings() {
@@ -5998,6 +6055,61 @@ async function sendWelcomeFlow(member) {
   await markWelcomed(member.id);
 }
 
+function renderTraderWelcomeContent(member, settings) {
+  const values = {
+    mention: `<@${member.id}>`,
+    member: `<@${member.id}>`,
+    username: member.user?.username || member.displayName || 'there',
+    displayName: member.displayName || member.user?.username || 'there',
+    brandName: BRAND_NAME,
+    websiteUrl: WEBSITE_URL,
+  };
+  const mention = renderTemplate(settings.mentionTemplate || '{mention}', values).trim() || values.mention;
+  const message = renderTemplate(settings.message || '', values).trim();
+  return `${mention} ${message}`.trim();
+}
+
+async function sendTraderWelcomeFlow(member) {
+  const settings = await getTraderWelcomeSettings();
+  if (!settings.enabled) return { skipped: true, reason: 'disabled' };
+  if (!settings.channelId) return { skipped: true, reason: 'missing_channel' };
+  if (!settings.message) return { skipped: true, reason: 'missing_message' };
+
+  if (settings.delayMs) {
+    await sleep(settings.delayMs);
+  }
+
+  const content = renderTraderWelcomeContent(member, settings);
+  if (!content) return { skipped: true, reason: 'empty_message' };
+
+  const channel = await fetchTextChannel(settings.channelId);
+  const message = await channel.send({
+    content,
+    allowedMentions: { users: [member.id], parse: [] },
+  });
+  await logActivity({
+    type: 'welcome',
+    action: 'trader_chat_post',
+    source: 'bot',
+    discordUserId: member.id,
+    entityType: 'discord_message',
+    entityId: message.id,
+    metadata: { channelId: settings.channelId },
+  });
+  return { sent: true, messageId: message.id, channelId: settings.channelId };
+}
+
+async function handleNewGuildMember(member) {
+  if (member.user.bot) return;
+  if (member.pending) return;
+  await sendWelcomeFlow(member).catch(error => {
+    console.log(`Welcome flow failed for ${member.id}: ${error.message}`);
+  });
+  await sendTraderWelcomeFlow(member).catch(error => {
+    console.log(`Trader welcome flow failed for ${member.id}: ${error.message}`);
+  });
+}
+
 client.once('clientReady', async () => {
   console.log(`Bot is online as ${client.user.tag}`);
   const desiredBotName = process.env.DISCORD_BOT_DISPLAY_NAME || 'TTT Markets';
@@ -6032,17 +6144,13 @@ client.once('clientReady', async () => {
   });
 });
 
-client.on('guildMemberAdd', async member => {
-  if (member.user.bot) return;
-  if (member.pending) return;
-  await sendWelcomeFlow(member);
-});
+client.on('guildMemberAdd', handleNewGuildMember);
 
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
   if (newMember.user.bot) return;
 
   if (oldMember.pending && !newMember.pending) {
-    await sendWelcomeFlow(newMember);
+    await handleNewGuildMember(newMember);
   }
 });
 
@@ -7463,6 +7571,53 @@ function startCRMStatsServer() {
     const result = await sendAnnouncementById(req.params.id, req);
     const announcement = await getAnnouncement(req.params.id);
     apiSuccess(res, result, { extra: { result, announcement } });
+  }));
+
+  router.get('/settings/trader-welcome', asyncRoute(async (req, res) => {
+    const settings = await getTraderWelcomeSettings();
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.patch('/settings/trader-welcome', asyncRoute(async (req, res) => {
+    const settings = await updateTraderWelcomeSettings(req.body || {});
+    await logActivity({ type: 'settings', action: 'trader_welcome_updated', actor: getActor(req), source: 'crm_api' });
+    apiSuccess(res, settings, { extra: { settings } });
+  }));
+
+  router.post('/settings/trader-welcome/test', asyncRoute(async (req, res) => {
+    const saved = await getTraderWelcomeSettings();
+    const settings = normalizeTraderWelcomeSettings({ ...saved, ...(req.body || {}) });
+    if (settings.channelId) settings.channelId = requireDiscordId(settings.channelId, 'Trader chat channel ID');
+    if (!settings.channelId) throw createApiError('TRADER_WELCOME_CHANNEL_REQUIRED', 'Choose a trader chat channel before sending a test.', 400);
+    if (!settings.message) throw createApiError('TRADER_WELCOME_MESSAGE_REQUIRED', 'Add a welcome message before sending a test.', 400);
+
+    const memberId = req.body.discordUserId ? requireDiscordId(req.body.discordUserId) : null;
+    const guild = await getGuild();
+    const member = memberId && guild ? await guild.members.fetch(memberId).catch(() => null) : null;
+    const fakeMember = member || {
+      id: memberId || client.user?.id || '0',
+      user: { username: 'Test User' },
+      displayName: 'Test User',
+      toString: () => memberId ? `<@${memberId}>` : '@Test User',
+    };
+    const channel = await fetchTextChannel(settings.channelId);
+    const sent = await channel.send({
+      content: renderTraderWelcomeContent(fakeMember, settings),
+      allowedMentions: { users: [fakeMember.id], parse: [] },
+    });
+    await logActivity({
+      type: 'welcome',
+      action: 'trader_chat_test',
+      actor: getActor(req),
+      source: 'crm_api',
+      discordUserId: fakeMember.id,
+      entityType: 'discord_message',
+      entityId: sent.id,
+      metadata: { channelId: settings.channelId },
+    });
+    apiSuccess(res, { sent: true, messageId: sent.id, channelId: settings.channelId }, {
+      extra: { sent: true, messageId: sent.id, channelId: settings.channelId },
+    });
   }));
 
   router.get('/settings/welcome', asyncRoute(async (req, res) => {
