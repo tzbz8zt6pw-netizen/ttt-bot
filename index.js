@@ -555,6 +555,20 @@ async function initDB() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS trader_welcome_deliveries (
+      id SERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      message_id TEXT,
+      trigger TEXT,
+      status TEXT NOT NULL DEFAULT 'sent',
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(user_id, channel_id)
+    );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS app_state (
       key TEXT PRIMARY KEY,
       value TEXT
@@ -1402,6 +1416,29 @@ async function hasBeenWelcomed(userId) {
     [userId]
   );
   return result.rowCount > 0;
+}
+
+async function hasTraderWelcomeDelivery(userId, channelId) {
+  const result = await pool.query(
+    `SELECT 1 FROM trader_welcome_deliveries WHERE user_id = $1 AND channel_id = $2 AND status = 'sent' LIMIT 1`,
+    [userId, channelId]
+  );
+  return result.rowCount > 0;
+}
+
+async function recordTraderWelcomeDelivery({ userId, channelId, messageId = null, trigger = null, status = 'sent', errorMessage = null }) {
+  await pool.query(
+    `
+    INSERT INTO trader_welcome_deliveries (user_id, channel_id, message_id, trigger, status, error_message)
+    VALUES ($1, $2, $3, $4, $5, $6)
+    ON CONFLICT (user_id, channel_id)
+    DO UPDATE SET message_id = COALESCE(EXCLUDED.message_id, trader_welcome_deliveries.message_id),
+                  trigger = COALESCE(EXCLUDED.trigger, trader_welcome_deliveries.trigger),
+                  status = EXCLUDED.status,
+                  error_message = EXCLUDED.error_message
+    `,
+    [userId, channelId, messageId, trigger, status, errorMessage]
+  );
 }
 
 async function getAppState(key) {
@@ -6069,11 +6106,15 @@ function renderTraderWelcomeContent(member, settings) {
   return `${mention} ${message}`.trim();
 }
 
-async function sendTraderWelcomeFlow(member) {
+async function sendTraderWelcomeFlow(member, trigger = 'member_join') {
   const settings = await getTraderWelcomeSettings();
   if (!settings.enabled) return { skipped: true, reason: 'disabled' };
   if (!settings.channelId) return { skipped: true, reason: 'missing_channel' };
   if (!settings.message) return { skipped: true, reason: 'missing_message' };
+
+  if (await hasTraderWelcomeDelivery(member.id, settings.channelId)) {
+    return { skipped: true, reason: 'already_sent', channelId: settings.channelId };
+  }
 
   if (settings.delayMs) {
     await sleep(settings.delayMs);
@@ -6082,21 +6123,39 @@ async function sendTraderWelcomeFlow(member) {
   const content = renderTraderWelcomeContent(member, settings);
   if (!content) return { skipped: true, reason: 'empty_message' };
 
-  const channel = await fetchTextChannel(settings.channelId);
-  const message = await channel.send({
-    content,
-    allowedMentions: { users: [member.id], parse: [] },
-  });
-  await logActivity({
-    type: 'welcome',
-    action: 'trader_chat_post',
-    source: 'bot',
-    discordUserId: member.id,
-    entityType: 'discord_message',
-    entityId: message.id,
-    metadata: { channelId: settings.channelId },
-  });
-  return { sent: true, messageId: message.id, channelId: settings.channelId };
+  try {
+    const channel = await fetchTextChannel(settings.channelId);
+    const message = await channel.send({
+      content,
+      allowedMentions: { users: [member.id], parse: [] },
+    });
+    await recordTraderWelcomeDelivery({
+      userId: member.id,
+      channelId: settings.channelId,
+      messageId: message.id,
+      trigger,
+      status: 'sent',
+    });
+    await logActivity({
+      type: 'welcome',
+      action: 'trader_chat_post',
+      source: 'bot',
+      discordUserId: member.id,
+      entityType: 'discord_message',
+      entityId: message.id,
+      metadata: { channelId: settings.channelId, trigger },
+    });
+    return { sent: true, messageId: message.id, channelId: settings.channelId };
+  } catch (error) {
+    await recordTraderWelcomeDelivery({
+      userId: member.id,
+      channelId: settings.channelId,
+      trigger,
+      status: 'failed',
+      errorMessage: error.message,
+    }).catch(() => {});
+    throw error;
+  }
 }
 
 async function handleNewGuildMember(member) {
@@ -6105,9 +6164,13 @@ async function handleNewGuildMember(member) {
   await sendWelcomeFlow(member).catch(error => {
     console.log(`Welcome flow failed for ${member.id}: ${error.message}`);
   });
-  await sendTraderWelcomeFlow(member).catch(error => {
+  const traderWelcomeResult = await sendTraderWelcomeFlow(member, 'member_join').catch(error => {
     console.log(`Trader welcome flow failed for ${member.id}: ${error.message}`);
+    return null;
   });
+  if (traderWelcomeResult?.skipped) {
+    console.log(`Trader welcome skipped for ${member.id}: ${traderWelcomeResult.reason}`);
+  }
 }
 
 client.once('clientReady', async () => {
@@ -6993,6 +7056,22 @@ client.on('interactionCreate', async interaction => {
           : 'ℹ️ You are already subscribed to TTT promo alerts.',
         ephemeral: true,
       });
+
+      const traderWelcomeMember = interaction.member?.user
+        ? interaction.member
+        : {
+            id: userId,
+            user: interaction.user,
+            displayName: interaction.user.globalName || interaction.user.username || 'there',
+            toString: () => `<@${userId}>`,
+          };
+      const traderWelcomeResult = await sendTraderWelcomeFlow(traderWelcomeMember, 'subscribe_alerts').catch(error => {
+        console.log(`Trader welcome subscribe flow failed for ${userId}: ${error.message}`);
+        return null;
+      });
+      if (traderWelcomeResult?.skipped) {
+        console.log(`Trader welcome subscribe skipped for ${userId}: ${traderWelcomeResult.reason}`);
+      }
 
       if (added) {
         try {
